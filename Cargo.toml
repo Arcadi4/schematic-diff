@@ -1,0 +1,51 @@
+[package]
+name = "schematic-diff"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Renders Minecraft schematic diffs from `git diff` as images in the terminal"
+license = "MIT"
+repository = "https://github.com/Arcadi4/schematic-diff"
+keywords = ["minecraft", "schematic", "git", "diff", "kitty"]
+categories = ["command-line-utilities", "graphics"]
+
+[[bin]]
+name = "schematic-diff"
+path = "src/main.rs"
+
+[dependencies]
+# Format loading, diffing, the baked block colour table, and mesh production.
+#
+# Pinned to 0.10.14: from 0.10.15 onward, `meshing` does not build from
+# crates.io. The added `src/animation/glb.rs` is gated on `meshing` itself, so
+# no feature combination avoids it, and it imports the `gltf_build` API
+# (`export_build_glb`, `mesh_from_layers`, `BuildChild`, `BuildNode`,
+# `BuildScene`, `Interpolation`, `Track`). Nucleation depends on the mesher via
+# a dual version+git requirement pinned to a git rev that has that API, so its
+# own CI passes — but `cargo publish` resolves the version side, and published
+# `schematic-mesher 0.2.0` predates it. Every release through 0.10.24 fails for
+# registry consumers; 0.10.14 is the last one where the feature compiles.
+nucleation = { version = "=0.10.14", default-features = false, features = ["meshing"] }
+# The mesher nucleation's `meshing` feature uses. Taken directly as well, so the
+schematic-mesher = "0.2.0"
+
+# Vanilla-structure `.nbt` reading. Same version nucleation itself uses, so it
+# stays a single copy in the tree.
+quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+
+# `--pack`: read the zip and its JSON model files. Both are already in the
+# dependency graph behind nucleation, so this adds no new crate to compile.
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+serde_json = "1"
+
+# Image encoding for the kitty protocol payload.
+png = "0.17"
+base64 = "0.22"
+
+# `TIOCGWINSZ`, for the terminal's size and its cell dimensions in pixels.
+libc = "0.2"
+
+[profile.release]
+lto = true
+opt-level = 3
