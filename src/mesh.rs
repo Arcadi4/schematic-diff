@@ -206,10 +206,14 @@ impl Target {
                 if paint.blend && texel[3] == 0 {
                     continue;
                 }
-                // The mesh layer says what is *meant* to blend; the texel says
-                // how much. Glass is mostly clear, water mostly opaque, and both
-                // live in the same layer.
-                let texel_alpha = f32::from(texel[3]) / 255.0;
+                // The mesh layer says what is *meant* to blend; the texel and
+                // the mesher's per-vertex alpha say how much. Glass and water
+                // carry it in the texel, glow overlays (lit torch heads on
+                // repeaters/comparators/torches) in the vertices; both live in
+                // the same layer, so the two multiply.
+                let vertex_alpha =
+                    w0 * colors[0][3] + w1 * colors[1][3] + w2 * colors[2][3];
+                let alpha = (f32::from(texel[3]) / 255.0 * vertex_alpha).clamp(0.0, 1.0);
                 // The mesher's per-vertex colour carries tint, ambient occlusion
                 // and lighting; it modulates the texel rather than replacing it.
                 let shade = [
@@ -230,10 +234,10 @@ impl Target {
                     // used at its own opacity over the background.
                     let under = self.color[index];
                     self.color[index] = [
-                        mix(under[0], lit[0], texel_alpha),
-                        mix(under[1], lit[1], texel_alpha),
-                        mix(under[2], lit[2], texel_alpha),
-                        mix(under[3], 255, texel_alpha),
+                        mix(under[0], lit[0], alpha),
+                        mix(under[1], lit[1], alpha),
+                        mix(under[2], lit[2], alpha),
+                        mix(under[3], 255, alpha),
                     ];
                 } else {
                     self.color[index] = [lit[0], lit[1], lit[2], 255];
