@@ -37,28 +37,29 @@ use std::process::ExitCode;
 
 use nucleation::diff::{Diff, DiffSpec, diff};
 use nucleation::fingerprint::FingerprintSpec;
+use nucleation::{BlockState, UniversalSchematic};
 
 use crate::error::{Error, Result};
 use crate::format::Loaded;
-use crate::mesh::Marker;
+use crate::mesh::TintedMesh;
 use crate::pack::Pack;
-use crate::raster::{Layout, Panel, Picture, Segment, Theme, rgb};
-use crate::render::{Bounds, Camera, Grid};
+use crate::raster::{Layout, Panel, Picture, Segment, Theme, pack, rgb, tint};
+use crate::render::{Bounds, Camera, Grid, block_color};
 use crate::terminal::Output;
 
 /// Git's stand-in for a side that does not exist.
 const DEV_NULL: &str = "/dev/null";
 
-/// Marker colours, the single source of truth for both the pixels drawn into
-/// the change overlay and the caption text naming them, so the legend cannot
-/// drift from what it describes.
+/// Category colours, the single source of truth for the pixels showing a change
+/// and the caption text naming it, so the legend cannot drift from what it
+/// describes.
 const ADDED_COLOR: u32 = 0x70_B9_19;
 const REMOVED_COLOR: u32 = 0xA1_27_22;
 const CHANGED_COLOR: u32 = 0xF8_C5_27;
 const SWAPPED_COLOR: u32 = 0x3A_AF_D9;
 
-/// Caption greys, kept apart from the markers so a legend stays readable even
-/// where a marker colour is dark against the background.
+/// Caption greys, kept apart from the category colours so a legend stays
+/// readable even where one of those colours is dark against the background.
 const CAPTION_TEXT: [u8; 3] = [222, 226, 234];
 const ADDED_TEXT: [u8; 3] = [146, 208, 80];
 const REMOVED_TEXT: [u8; 3] = [228, 138, 133];
@@ -221,10 +222,24 @@ fn run() -> Result<()> {
         )),
         _ => None,
     };
-    let markers = change_markers(changes.as_ref());
-    let change_grid = match &after_grid {
-        Some(after) if !markers.is_empty() => Some(change_overlay(frame, after, &markers)?),
-        _ => None,
+    let categories = change_categories(changes.as_ref());
+
+    // The changes panel, in the form this run's renderer draws it: a grid of
+    // coloured blocks without a pack, one mesh per category with one.
+    let flat_changes = (pack.is_none() && !categories.is_empty())
+        .then(|| changes_grid(frame, &categories))
+        .transpose()?;
+    let meshed_changes = match &pack {
+        Some(pack) => categories
+            .iter()
+            .map(|category| {
+                Ok(TintedMesh {
+                    mesh: pack.mesh(&subset(&category.cells))?,
+                    color: category.color,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        None => Vec::new(),
     };
 
     let mut output = Output::detect();
@@ -245,13 +260,13 @@ fn run() -> Result<()> {
         Scene::Meshed {
             before: before_mesh.as_ref(),
             after: after_mesh.as_ref(),
-            markers: &markers,
+            changes: &meshed_changes,
         }
     } else {
         Scene::Flat {
             before: before_grid.as_ref(),
             after: after_grid.as_ref(),
-            overlay: change_grid.as_ref(),
+            changes: flat_changes.as_ref(),
         }
     };
     let image = compose_image(
@@ -323,18 +338,21 @@ fn report_once(message: std::fmt::Arguments<'_>) {
 /// One `--pack` decides the renderer for the whole run, so a diff is either all
 /// flat or all meshed and never a mixture. Splitting the two representations
 /// into separate variants says that in the type rather than in a comment.
+///
+/// The changed cells are not a variant of this: both renderers put them in the
+/// same three-panel layout, so they are carried alongside the scene instead.
 enum Scene<'a> {
     Flat {
         before: Option<&'a Grid>,
         after: Option<&'a Grid>,
-        /// The changed cells as a grid, for the overlay panel.
-        overlay: Option<&'a Grid>,
+        /// The changed blocks as a grid, for the changes panel.
+        changes: Option<&'a Grid>,
     },
     Meshed {
         before: Option<&'a nucleation::meshing::MeshOutput>,
         after: Option<&'a nucleation::meshing::MeshOutput>,
-        /// The changed cells as cubes, drawn over the mesh.
-        markers: &'a [Marker],
+        /// The changed blocks, one mesh per category, for the changes panel.
+        changes: &'a [TintedMesh],
     },
 }
 
@@ -358,35 +376,100 @@ fn mesh_bounds(output: &nucleation::meshing::MeshOutput) -> Bounds {
     }
 }
 
-/// Every changed cell, with the colour its category is drawn in.
+/// One category of change: the changed cells, and the colour they are shown in.
+struct Category<'a> {
+    color: u32,
+    /// Each changed cell with the block to draw in it. For a removal that is the
+    /// block that used to be there; every other category shows the block that is
+    /// there now, which is what the change produced.
+    ///
+    /// Taken from the diff rather than looked up in either build, because the
+    /// diff reports every cell in the after build's frame — the same frame the
+    /// camera and the two panels beside this one are working in.
+    cells: Vec<((i32, i32, i32), &'a BlockState)>,
+}
+
+/// The changes, grouped into the categories they are drawn in.
 ///
-/// One list serves both renderers: the meshed path draws these as cubes over the
-/// geometry, and the flat path writes their colours into an overlay grid.
-/// Deriving the grid from the same list is what keeps the two from drifting.
-fn change_markers(changes: Option<&Diff>) -> Vec<Marker> {
+/// Grouping is what lets each category be drawn in its own colour: a category is
+/// meshed on its own, and the colour is applied as the panel is rasterized, so
+/// the renderer never has to work out which category a triangle belongs to.
+fn change_categories(changes: Option<&Diff>) -> Vec<Category<'_>> {
     let Some(changes) = changes else {
+        // A change is defined against both sides, so a diff of an added or a
+        // deleted file has none to show.
         return Vec::new();
     };
-    let mut markers = Vec::new();
-    let mut push = |position: &(i32, i32, i32), color: u32| {
-        markers.push(Marker {
-            min: [position.0 as f32, position.1 as f32, position.2 as f32],
-            color,
-        });
-    };
-    for (position, _) in &changes.added {
-        push(position, ADDED_COLOR);
+    let category = |color, cells| Category { color, cells };
+    [
+        category(
+            ADDED_COLOR,
+            changes
+                .added
+                .iter()
+                .map(|(position, block)| (*position, block))
+                .collect(),
+        ),
+        category(
+            REMOVED_COLOR,
+            changes
+                .removed
+                .iter()
+                .map(|(position, block)| (*position, block))
+                .collect(),
+        ),
+        category(
+            CHANGED_COLOR,
+            changes
+                .changed
+                .iter()
+                .map(|(position, _, now)| (*position, now))
+                .collect(),
+        ),
+        category(
+            SWAPPED_COLOR,
+            changes
+                .swapped
+                .iter()
+                .map(|(position, _, now)| (*position, now))
+                .collect(),
+        ),
+    ]
+    .into_iter()
+    .filter(|category| !category.cells.is_empty())
+    .collect()
+}
+
+/// The changed blocks as a grid, for the flat renderer's changes panel.
+///
+/// Each cell holds the colour of the block that changed, with the category's
+/// colour laid over it — the same treatment the meshed panels give their
+/// textures, and what keeps the two renderers showing the same thing.
+///
+/// The grid spans the union extent, because a removal can sit outside the after
+/// build's own bounds: that is precisely what a shrunken build looks like, and
+/// it has to stay visible.
+fn changes_grid(frame: Bounds, categories: &[Category<'_>]) -> Result<Grid> {
+    let mut grid = Grid::empty_over(frame)?;
+    for category in categories {
+        for ((x, y, z), block) in &category.cells {
+            let block = rgb(block_color(block));
+            grid.set(*x, *y, *z, pack(tint(block, rgb(category.color))));
+        }
     }
-    for (position, _) in &changes.removed {
-        push(position, REMOVED_COLOR);
+    Ok(grid)
+}
+
+/// One category's cells as a schematic of their own, ready to mesh.
+///
+/// The mesher draws exactly what it is given, so handing it a category's cells
+/// and nothing else is what keeps the changes panel to the blocks that changed.
+fn subset(cells: &[((i32, i32, i32), &BlockState)]) -> UniversalSchematic {
+    let mut subset = UniversalSchematic::new(String::new());
+    for ((x, y, z), block) in cells {
+        subset.set_block(*x, *y, *z, block);
     }
-    for (position, _, _) in &changes.changed {
-        push(position, CHANGED_COLOR);
-    }
-    for (position, _, _) in &changes.swapped {
-        push(position, SWAPPED_COLOR);
-    }
-    markers
+    subset
 }
 
 /// Rasterize one side, if it exists.
@@ -404,125 +487,76 @@ fn load_side(path: Option<&Path>) -> Result<Option<Loaded>> {
     }
 }
 
-/// Draw the changed cells over a copy of the after build.
-///
-/// The grid spans the union extent, because a removal can sit outside the after
-/// build's own bounds — that is precisely what a shrunken build looks like, and
-/// it has to stay visible.
-fn change_overlay(frame: Bounds, after: &Grid, markers: &[Marker]) -> Result<Grid> {
-    let mut grid = Grid::empty_over(frame)?;
-    grid.copy_from(after);
-    for marker in markers {
-        grid.set(
-            marker.min[0] as i32,
-            marker.min[1] as i32,
-            marker.min[2] as i32,
-            marker.color,
-        );
-    }
-    Ok(grid)
-}
-
 /// Choose the panels and composite them.
+///
+/// The layout is the same in both renderers — before, after, then the changed
+/// blocks — so only what each panel is drawn from differs, which is exactly the
+/// difference [`Scene`] carries.
 fn compose_image(invocation: &Invocation, scene: &Scene<'_>, layout: Layout) -> raster::Canvas {
     let (before_name, after_name) = invocation.labels();
-    let mut panels: Vec<Panel<'_>> = Vec::new();
-
-    // Each variant lays out in its own terms, because the two carry different
-    // things: a grid and an overlay, or meshes and markers.
-    match scene {
+    let (before, after, changes) = match *scene {
         Scene::Flat {
             before,
             after,
-            overlay,
-        } => {
-            let note = if overlay.is_some() {
-                ""
-            } else {
-                "  (no changes)"
-            };
-            match (before, after) {
-                (Some(before), Some(after)) => {
-                    panels.push(Panel::new(
-                        format!("BEFORE  {before_name}"),
-                        CAPTION_TEXT,
-                        Picture::Flat(before),
-                    ));
-                    panels.push(Panel::new(
-                        format!("AFTER  {after_name}{note}"),
-                        CAPTION_TEXT,
-                        Picture::Flat(after),
-                    ));
-                    // Two panels are always drawn, so the comparison survives a
-                    // narrow window; the change overlay is the one that can go.
-                    if let Some(overlay) = overlay
-                        && raster::fits(layout.width, 3)
-                    {
-                        panels.push(Panel::legend(change_legend(), Picture::Flat(overlay)));
-                    }
-                }
-                (None, Some(after)) => panels.push(Panel::new(
-                    format!("ADDED  {after_name}"),
-                    ADDED_TEXT,
-                    Picture::Flat(after),
-                )),
-                (Some(before), None) => panels.push(Panel::new(
-                    format!("DELETED  {before_name}"),
-                    REMOVED_TEXT,
-                    Picture::Flat(before),
-                )),
-                (None, None) => {}
-            }
-        }
+            changes,
+        } => (
+            before.map(Picture::Flat),
+            after.map(Picture::Flat),
+            changes.map(Picture::Flat),
+        ),
         Scene::Meshed {
             before,
             after,
-            markers,
-        } => {
-            let note = if markers.is_empty() {
-                "  (no changes)"
-            } else {
-                ""
-            };
-            match (before, after) {
-                (Some(before), Some(after)) => {
-                    panels.push(Panel::new(
-                        format!("BEFORE  {before_name}"),
-                        CAPTION_TEXT,
-                        Picture::Mesh(before, &[]),
-                    ));
-                    panels.push(Panel::new(
-                        format!("AFTER  {after_name}{note}"),
-                        CAPTION_TEXT,
-                        Picture::Mesh(after, markers),
-                    ));
-                    if !markers.is_empty() && raster::fits(layout.width, 3) {
-                        panels.push(Panel::legend(
-                            change_legend(),
-                            Picture::Mesh(after, markers),
-                        ));
-                    }
-                }
-                (None, Some(after)) => panels.push(Panel::new(
-                    format!("ADDED  {after_name}"),
-                    ADDED_TEXT,
-                    Picture::Mesh(after, markers),
-                )),
-                (Some(before), None) => panels.push(Panel::new(
-                    format!("DELETED  {before_name}"),
-                    REMOVED_TEXT,
-                    Picture::Mesh(before, &[]),
-                )),
-                (None, None) => {}
+            changes,
+        } => (
+            before.map(Picture::Mesh),
+            after.map(Picture::Mesh),
+            (!changes.is_empty()).then_some(Picture::Changes(changes)),
+        ),
+    };
+
+    let mut panels: Vec<Panel<'_>> = Vec::new();
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            panels.push(Panel::new(
+                format!("BEFORE  {before_name}"),
+                CAPTION_TEXT,
+                before,
+            ));
+            // The after panel carries the note: it is the side the diff is read
+            // against, and the one a reader looks at when nothing is tinted.
+            let note = if changes.is_some() { "" } else { "  (no changes)" };
+            panels.push(Panel::new(
+                format!("AFTER  {after_name}{note}"),
+                CAPTION_TEXT,
+                after,
+            ));
+            // Two panels are always drawn, so the comparison survives a narrow
+            // window; the changes panel is the one that can go.
+            if let Some(changes) = changes
+                && raster::fits(layout.width, 3)
+            {
+                panels.push(Panel::legend(change_legend(), changes));
             }
         }
+        (None, Some(after)) => panels.push(Panel::new(
+            format!("ADDED  {after_name}"),
+            ADDED_TEXT,
+            after,
+        )),
+        (Some(before), None) => panels.push(Panel::new(
+            format!("DELETED  {before_name}"),
+            REMOVED_TEXT,
+            before,
+        )),
+        (None, None) => {}
     }
 
     raster::compose(&panels, &invocation.camera, &layout, &Theme::default())
 }
 
-/// The caption for the change overlay, one segment per category, each drawn in
-/// the colour of the cells it names.
+/// The caption of the changes panel, one segment per category, each drawn in
+/// the colour of the blocks it names.
 fn change_legend() -> Vec<Segment> {
     vec![
         Segment::new("CHANGES  ", CAPTION_TEXT),

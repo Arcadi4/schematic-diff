@@ -7,23 +7,23 @@
 //! faces are oriented, what tint applies) are made by the mesher, and this only
 //! has to put the triangles on screen.
 
-use nucleation::meshing::MeshLayer;
+use nucleation::meshing::{MeshLayer, MeshOutput};
 use schematic_mesher::TextureAtlas;
 
-use crate::raster::{Canvas, rgb};
+use crate::raster::{Canvas, rgb, tint};
 use crate::render::{Bounds, Camera, Eye};
 
-/// One triangle's three vertices, as the mesher supplies them.
-pub struct Facet<'a> {
-    pub positions: [[f32; 3]; 3],
-    pub uvs: [[f32; 2]; 3],
-    pub colors: [[f32; 4]; 3],
-    /// The atlas to sample, or `None` for a flat-coloured triangle.
-    pub atlas: Option<&'a TextureAtlas>,
-    /// A solid colour, for markers drawn over the mesh.
-    pub flat: Option<[u8; 3]>,
-    /// Whether this triangle blends with what is already drawn.
-    pub blend: bool,
+/// How a layer's triangles are drawn.
+///
+/// The three parts are what the pixel loop needs beyond the geometry itself:
+/// where to sample colour from, what to lay over it, and whether to blend with
+/// what is already there.
+struct Paint<'a> {
+    atlas: &'a TextureAtlas,
+    /// A colour filtered over every texel drawn, for the changes panel.
+    filter: Option<[u8; 3]>,
+    /// Whether these triangles blend with what is already drawn.
+    blend: bool,
 }
 
 /// A point on a triangle, after projection.
@@ -40,7 +40,7 @@ struct Screen {
 /// Both this and the block-grid raycaster derive from [`Camera`], so the two
 /// renderers frame a build identically and swapping between them is not a
 /// change of viewpoint.
-pub struct View {
+struct View {
     eye: Eye,
     /// Pixels per unit at unit depth.
     focal: f32,
@@ -96,14 +96,8 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// A colour to show at a changed cell, drawn over the mesh.
-pub struct Marker {
-    pub min: [f32; 3],
-    pub color: u32,
-}
-
 /// An image being drawn into, with a depth buffer.
-pub struct Target {
+struct Target {
     width: u32,
     height: u32,
     color: Vec<[u8; 4]>,
@@ -111,7 +105,7 @@ pub struct Target {
 }
 
 impl Target {
-    pub fn new(width: u32, height: u32) -> Self {
+    fn new(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
@@ -125,19 +119,18 @@ impl Target {
         (y as usize) * (self.width as usize) + x as usize
     }
 
-    /// Draw one triangle, sampling `atlas` through its UVs.
+    /// Draw one triangle, sampling `paint.atlas` through its UVs.
     ///
     /// `colors` are the mesher's per-vertex tints, already carrying the game's
     /// own shading, so they are interpolated and applied rather than replaced.
-    fn triangle(&mut self, view: &View, facet: &Facet<'_>) {
-        let Facet {
-            positions,
-            uvs,
-            colors,
-            atlas,
-            flat,
-            blend,
-        } = *facet;
+    fn triangle(
+        &mut self,
+        view: &View,
+        positions: [[f32; 3]; 3],
+        uvs: [[f32; 2]; 3],
+        colors: [[f32; 4]; 3],
+        paint: &Paint<'_>,
+    ) {
         let Some(a) = view.project(positions[0]) else {
             return;
         };
@@ -194,72 +187,53 @@ impl Target {
                     continue;
                 }
 
-                let mut texel_alpha = 1.0f32;
-                let (red, green, blue) = match (flat, atlas) {
-                    (Some(color), _) => (color[0], color[1], color[2]),
-                    (None, Some(atlas)) => {
-                        // Perspective-correct UVs, the same weighting as depth.
-                        let u = (w0 * uvs[0][0] * inv_z[0]
-                            + w1 * uvs[1][0] * inv_z[1]
-                            + w2 * uvs[2][0] * inv_z[2])
-                            * depth;
-                        let v = (w0 * uvs[0][1] * inv_z[0]
-                            + w1 * uvs[1][1] * inv_z[1]
-                            + w2 * uvs[2][1] * inv_z[2])
-                            * depth;
-                        let texel = sample_atlas(atlas, u, v);
-                        // In a mixed layer a see-through texel lets whatever is
-                        // behind show through; in an alpha-tested one it is
-                        // either drawn or discarded outright.
-                        if !blend && texel[3] < 128 {
-                            continue;
-                        }
-                        if blend && texel[3] == 0 {
-                            continue;
-                        }
-                        // The mesh layer says what is *meant* to blend; the
-                        // texel says how much. Glass is mostly clear, water
-                        // mostly opaque, and both live in the same layer.
-                        texel_alpha = f32::from(texel[3]) / 255.0;
-                        // The mesher's per-vertex colour carries tint, ambient
-                        // occlusion and lighting; it modulates the texel rather
-                        // than replacing it.
-                        let shade = [
-                            w0 * colors[0][0] + w1 * colors[1][0] + w2 * colors[2][0],
-                            w0 * colors[0][1] + w1 * colors[1][1] + w2 * colors[2][1],
-                            w0 * colors[0][2] + w1 * colors[1][2] + w2 * colors[2][2],
-                        ];
-                        (
-                            clamp_byte(texel[0] as f32 * shade[0]),
-                            clamp_byte(texel[1] as f32 * shade[1]),
-                            clamp_byte(texel[2] as f32 * shade[2]),
-                        )
-                    }
-                    (None, None) => continue,
-                };
-
+                // Perspective-correct UVs, the same weighting as depth.
+                let u = (w0 * uvs[0][0] * inv_z[0]
+                    + w1 * uvs[1][0] * inv_z[1]
+                    + w2 * uvs[2][0] * inv_z[2])
+                    * depth;
+                let v = (w0 * uvs[0][1] * inv_z[0]
+                    + w1 * uvs[1][1] * inv_z[1]
+                    + w2 * uvs[2][1] * inv_z[2])
+                    * depth;
+                let texel = sample_atlas(paint.atlas, u, v);
+                // In a mixed layer a see-through texel lets whatever is behind
+                // show through; in an alpha-tested one it is either drawn or
+                // discarded outright.
+                if !paint.blend && texel[3] < 128 {
+                    continue;
+                }
+                if paint.blend && texel[3] == 0 {
+                    continue;
+                }
+                // The mesh layer says what is *meant* to blend; the texel says
+                // how much. Glass is mostly clear, water mostly opaque, and both
+                // live in the same layer.
+                let texel_alpha = f32::from(texel[3]) / 255.0;
+                // The mesher's per-vertex colour carries tint, ambient occlusion
+                // and lighting; it modulates the texel rather than replacing it.
+                let shade = [
+                    w0 * colors[0][0] + w1 * colors[1][0] + w2 * colors[2][0],
+                    w0 * colors[0][1] + w1 * colors[1][1] + w2 * colors[2][1],
+                    w0 * colors[0][2] + w1 * colors[1][2] + w2 * colors[2][2],
+                ];
                 let fog = view.fog(depth);
                 // The transparent layer blends, so it must not occlude what is
                 // already drawn at this pixel.
-                if !blend {
+                if !paint.blend {
                     self.depth[index] = depth;
                 }
-                let lit = [
-                    clamp_byte(red as f32 * fog),
-                    clamp_byte(green as f32 * fog),
-                    clamp_byte(blue as f32 * fog),
-                ];
-                if blend {
+                let lit = lit_texel(&texel, shade, fog, paint.filter);
+                if paint.blend {
+                    // Nothing drawn behind it yet: blending against the backdrop
+                    // would leave a faint square, so the texel's own colour is
+                    // used at its own opacity over the background.
                     let under = self.color[index];
-                    // Nothing drawn behind it yet: blending against the
-                    // backdrop would leave a faint square, so the texel's own
-                    // colour is used at its own opacity over the background.
-                    let alpha = texel_alpha;
                     self.color[index] = [
-                        clamp_byte(under[0] as f32 * (1.0 - alpha) + lit[0] as f32 * alpha),
-                        clamp_byte(under[1] as f32 * (1.0 - alpha) + lit[1] as f32 * alpha),
-                        clamp_byte(under[2] as f32 * (1.0 - alpha) + lit[2] as f32 * alpha),
-                        clamp_byte(under[3] as f32 * (1.0 - alpha) + 255.0 * alpha),
+                        mix(under[0], lit[0], texel_alpha),
+                        mix(under[1], lit[1], texel_alpha),
+                        mix(under[2], lit[2], texel_alpha),
+                        mix(under[3], 255, texel_alpha),
                     ];
                 } else {
                     self.color[index] = [lit[0], lit[1], lit[2], 255];
@@ -269,7 +243,7 @@ impl Target {
     }
 
     /// Draw one mesh layer.
-    pub fn layer(&mut self, view: &View, layer: &MeshLayer, atlas: &TextureAtlas, blend: bool) {
+    fn layer(&mut self, view: &View, layer: &MeshLayer, paint: &Paint<'_>) {
         for triangle in layer.indices.as_chunks::<3>().0 {
             let [i0, i1, i2] = [
                 triangle[0] as usize,
@@ -284,90 +258,24 @@ impl Target {
             }
             self.triangle(
                 view,
-                &Facet {
-                    positions: [
-                        layer.positions[i0],
-                        layer.positions[i1],
-                        layer.positions[i2],
-                    ],
-                    uvs: [layer.uvs[i0], layer.uvs[i1], layer.uvs[i2]],
-                    colors: [
-                        color_at(&layer.colors, i0),
-                        color_at(&layer.colors, i1),
-                        color_at(&layer.colors, i2),
-                    ],
-                    atlas: Some(atlas),
-                    flat: None,
-                    blend,
-                },
-            );
-        }
-    }
-
-    /// Draw a changed cell as a solid cube.
-    ///
-    /// Drawn through the same depth buffer as the mesh, so a marker inside the
-    /// build is hidden by whatever encloses it and one on the surface is not.
-    pub fn cube(&mut self, view: &View, marker: &Marker) {
-        let color = rgb(marker.color);
-        // Inset a hair: a marker sits exactly on the cell's surface, and without
-        // this the depth test would be a coin toss against the block beneath.
-        let inset = 0.004;
-        let min = [
-            marker.min[0] + inset,
-            marker.min[1] + inset,
-            marker.min[2] + inset,
-        ];
-        let max = [
-            marker.min[0] + 1.0 - inset,
-            marker.min[1] + 1.0 - inset,
-            marker.min[2] + 1.0 - inset,
-        ];
-
-        let corner = |x: usize, y: usize, z: usize| {
-            [
-                if x == 0 { min[0] } else { max[0] },
-                if y == 0 { min[1] } else { max[1] },
-                if z == 0 { min[2] } else { max[2] },
-            ]
-        };
-        // The six faces, each as two triangles.
-        const FACES: [[[usize; 3]; 4]; 6] = [
-            [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]], // +X
-            [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]], // +Y
-            [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], // +Z
-            [[0, 0, 0], [0, 1, 0], [0, 1, 1], [0, 0, 1]], // -X
-            [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]], // -Y
-            [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]], // -Z
-        ];
-        for face in FACES {
-            let p: [[f32; 3]; 4] = [
-                corner(face[0][0], face[0][1], face[0][2]),
-                corner(face[1][0], face[1][1], face[1][2]),
-                corner(face[2][0], face[2][1], face[2][2]),
-                corner(face[3][0], face[3][1], face[3][2]),
-            ];
-            let solid = Facet {
-                positions: [p[0], p[1], p[2]],
-                uvs: [[0.0, 0.0]; 3],
-                colors: [[1.0, 1.0, 1.0, 1.0]; 3],
-                atlas: None,
-                flat: Some(color),
-                blend: false,
-            };
-            self.triangle(view, &solid);
-            self.triangle(
-                view,
-                &Facet {
-                    positions: [p[0], p[2], p[3]],
-                    ..solid
-                },
+                [
+                    layer.positions[i0],
+                    layer.positions[i1],
+                    layer.positions[i2],
+                ],
+                [layer.uvs[i0], layer.uvs[i1], layer.uvs[i2]],
+                [
+                    color_at(&layer.colors, i0),
+                    color_at(&layer.colors, i1),
+                    color_at(&layer.colors, i2),
+                ],
+                paint,
             );
         }
     }
 
     /// Copy into a canvas, leaving untouched pixels transparent.
-    pub fn into_canvas(self) -> Canvas {
+    fn into_canvas(self) -> Canvas {
         let mut canvas = Canvas::new(self.width, self.height);
         for (index, texel) in self.color.iter().enumerate() {
             if texel[3] == 0 {
@@ -381,6 +289,23 @@ impl Target {
         }
         canvas
     }
+}
+
+/// One channel of a blend: `over` laid over `base` at `alpha`.
+fn mix(base: u8, over: u8, alpha: f32) -> u8 {
+    clamp_byte(f32::from(base) * (1.0 - alpha) + f32::from(over) * alpha)
+}
+
+/// The colour a texel ends up as: shaded, set back by fog, and — where the
+/// changes panel asks for it — filtered towards the colour of the category the
+/// block belongs to.
+fn lit_texel(texel: &[u8; 4], shade: [f32; 3], fog: f32, filter: Option<[u8; 3]>) -> [u8; 3] {
+    let shaded = [
+        clamp_byte(f32::from(texel[0]) * shade[0] * fog),
+        clamp_byte(f32::from(texel[1]) * shade[1] * fog),
+        clamp_byte(f32::from(texel[2]) * shade[2] * fog),
+    ];
+    filter.map_or(shaded, |filter| tint(shaded, filter))
 }
 
 fn color_at(colors: &[[f32; 4]], index: usize) -> [f32; 4] {
@@ -408,15 +333,21 @@ fn sample_atlas(atlas: &TextureAtlas, u: f32, v: f32) -> [u8; 4] {
     }
 }
 
-/// Draw a meshed build, with any changed cells marked over it.
+/// A category of change, meshed: the blocks that changed, and the colour laid
+/// over them.
+pub struct TintedMesh {
+    pub mesh: MeshOutput,
+    pub color: u32,
+}
+
+/// Draw a meshed build.
 ///
 /// The mesher sorts geometry into opaque, alpha-tested and blended layers, and
 /// they are drawn in that order because that is what the sorting is for:
 /// opaque fills the picture, cut-outs punch through it, and glass and water
 /// tint whatever is already behind them.
 pub fn draw(
-    output: &nucleation::meshing::MeshOutput,
-    markers: &[Marker],
+    output: &MeshOutput,
     frame: Bounds,
     camera: &Camera,
     width: u32,
@@ -425,15 +356,51 @@ pub fn draw(
     if width == 0 || height == 0 {
         return Canvas::new(width, height);
     }
-    let eye = camera.eye_and_basis(frame);
-    let view = View::new(eye, width, height);
+    let view = View::new(camera.eye_and_basis(frame), width, height);
     let mut target = Target::new(width, height);
     let atlas = &output.atlas;
-    target.layer(&view, &output.opaque, atlas, false);
-    target.layer(&view, &output.cutout, atlas, false);
-    for marker in markers {
-        target.cube(&view, marker);
-    }
-    target.layer(&view, &output.transparent, atlas, true);
+    target.layer(&view, &output.opaque, &paint(atlas, None, false));
+    target.layer(&view, &output.cutout, &paint(atlas, None, false));
+    target.layer(&view, &output.transparent, &paint(atlas, None, true));
     target.into_canvas()
+}
+
+/// Draw the changed blocks alone, each category's colour filtered over it.
+///
+/// This is the changes panel. It shows only what changed — a panel about the
+/// difference has nothing to say about the blocks that stayed the same — and
+/// shows it as the blocks themselves, tinted, rather than as coloured cubes.
+pub fn draw_changes(
+    categories: &[TintedMesh],
+    frame: Bounds,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+) -> Canvas {
+    if width == 0 || height == 0 {
+        return Canvas::new(width, height);
+    }
+    let view = View::new(camera.eye_and_basis(frame), width, height);
+    let mut target = Target::new(width, height);
+    // The categories cover disjoint cells, so opaque and cut-out geometry can be
+    // drawn a category at a time; the blended layers come after all of them,
+    // because they read what is already drawn behind them.
+    for category in categories {
+        let paint = paint(&category.mesh.atlas, Some(rgb(category.color)), false);
+        target.layer(&view, &category.mesh.opaque, &paint);
+        target.layer(&view, &category.mesh.cutout, &paint);
+    }
+    for category in categories {
+        let paint = paint(&category.mesh.atlas, Some(rgb(category.color)), true);
+        target.layer(&view, &category.mesh.transparent, &paint);
+    }
+    target.into_canvas()
+}
+
+fn paint(atlas: &TextureAtlas, filter: Option<[u8; 3]>, blend: bool) -> Paint<'_> {
+    Paint {
+        atlas,
+        filter,
+        blend,
+    }
 }

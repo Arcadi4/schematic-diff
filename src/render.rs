@@ -188,8 +188,8 @@ impl Grid {
 
     /// An all-empty grid spanning `bounds`.
     ///
-    /// Used to draw a change overlay, which has to cover the union of both
-    /// builds: a removal can sit outside the after build's own extent.
+    /// Used for the changes panel, which has to cover the union of both builds:
+    /// a removal can sit outside the after build's own extent.
     pub fn empty_over(bounds: Bounds) -> Result<Self> {
         let size = bounds.size();
         let cells = i64::from(size[0]) * i64::from(size[1]) * i64::from(size[2]);
@@ -204,26 +204,6 @@ impl Grid {
             dims: [size[0] as usize, size[1] as usize, size[2] as usize],
             cells: vec![0; cells as usize],
         })
-    }
-
-    /// Copy every occupied cell of `other` into this grid.
-    pub fn copy_from(&mut self, other: &Grid) {
-        for y in 0..other.dims[1] {
-            for z in 0..other.dims[2] {
-                let row = (y * other.dims[2] + z) * other.dims[0];
-                for x in 0..other.dims[0] {
-                    let cell = other.cells[row + x];
-                    if cell != 0 {
-                        self.set(
-                            other.min[0] + x as i32,
-                            other.min[1] + y as i32,
-                            other.min[2] + z as i32,
-                            cell,
-                        );
-                    }
-                }
-            }
-        }
     }
 
     /// Flat index of a cell, or `None` if it lies outside the grid.
@@ -471,7 +451,11 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     [v[0] / length, v[1] / length, v[2] / length]
 }
 
-/// How much light a face receives, by the face the ray entered through.
+/// How much light a face receives, from the index [`box_span`] reports.
+///
+/// Faces 0 to 2 are the positive direction of each axis, 3 to 5 the negative:
+/// tops are lit, X-axis faces catch the side light, and Y faces fall in
+/// between.
 fn face_shade(face: u8) -> f32 {
     match face {
         1 => 1.0,

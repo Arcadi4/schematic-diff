@@ -1,7 +1,7 @@
 //! The composited image: a small RGBA8 raster, and the panel layout drawn into
 //! it.
 //!
-//! Everything the terminal shows — the two builds, the change overlay, and the
+//! Everything the terminal shows — the two builds, the changed cells, and the
 //! captions naming them — is one picture, because the kitty protocol places one
 //! image over one rectangle of cells. Nothing is aligned by hand afterwards.
 
@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::font;
 use nucleation::meshing::MeshOutput;
 
-use crate::mesh::{Marker, draw as draw_mesh};
+use crate::mesh::{TintedMesh, draw as draw_mesh, draw_changes};
 use crate::render::{Bounds, Camera, Grid, render};
 
 /// A packed `0xRRGGBB` as its three channels.
@@ -18,6 +18,32 @@ pub fn rgb(color: u32) -> [u8; 3] {
         ((color >> 16) & 0xff) as u8,
         ((color >> 8) & 0xff) as u8,
         (color & 0xff) as u8,
+    ]
+}
+
+/// Three channels as a packed `0xRRGGBB`.
+pub fn pack(color: [u8; 3]) -> u32 {
+    (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
+}
+
+/// How much of a change category's colour is laid over the block itself.
+///
+/// The colour has to mark the cell at a glance and still leave the block
+/// recognisable underneath it, which is what this is for: at full strength the
+/// changes panel would show a coloured block and nothing about the block it
+/// stands for.
+const TINT: f32 = 0.55;
+
+/// A block's own colour, with the colour of the category it changed in filtered
+/// over it.
+pub fn tint(block: [u8; 3], color: [u8; 3]) -> [u8; 3] {
+    let channel = |block: u8, color: u8| {
+        (f32::from(block) * (1.0 - TINT) + f32::from(color) * TINT).clamp(0.0, 255.0) as u8
+    };
+    [
+        channel(block[0], color[0]),
+        channel(block[1], color[1]),
+        channel(block[2], color[2]),
     ]
 }
 
@@ -130,9 +156,9 @@ impl Default for Theme {
 
 /// A run of caption text drawn in one colour.
 ///
-/// The change legend is built from these so each category is drawn in the same
-/// colour as the blocks it names, which is the only thing that tells a reader
-/// what a cyan cell means.
+/// A legend is built from these so each category is named in the same colour as
+/// the blocks it stands for, which is the only thing that tells a reader what a
+/// cyan block means.
 pub struct Segment {
     pub text: String,
     pub color: [u8; 3],
@@ -151,8 +177,11 @@ impl Segment {
 pub enum Picture<'a> {
     /// A grid of single-coloured cubes — the no-pack path.
     Flat(&'a Grid),
-    /// Meshed geometry, with changed cells marked over it.
-    Mesh(&'a MeshOutput, &'a [Marker]),
+    /// Meshed geometry.
+    Mesh(&'a MeshOutput),
+    /// The changed blocks alone, one mesh per category, each drawn with its
+    /// category's colour filtered over it.
+    Changes(&'a [TintedMesh]),
 }
 
 /// One column of the composite: a caption, and the build it names.
@@ -247,15 +276,14 @@ pub fn compose(panels: &[Panel<'_>], camera: &Camera, layout: &Layout, theme: &T
 
         let body_height = layout.height.saturating_sub(band as u32);
         let picture = match &panel.picture {
+            // The camera is framed to the layout's shared frame, not to the
+            // picture's own extent, so every panel of one composite shows the
+            // same build at the same scale.
             Picture::Flat(grid) => render(grid, layout.frame, camera, panel_width, body_height),
-            Picture::Mesh(mesh, markers) => draw_mesh(
-                mesh,
-                markers,
-                layout.frame,
-                camera,
-                panel_width,
-                body_height,
-            ),
+            Picture::Mesh(mesh) => draw_mesh(mesh, layout.frame, camera, panel_width, body_height),
+            Picture::Changes(categories) => {
+                draw_changes(categories, layout.frame, camera, panel_width, body_height)
+            }
         };
         canvas.blit(&picture, i64::from(panel_x), band);
 
