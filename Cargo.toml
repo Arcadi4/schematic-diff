@@ -34,11 +34,6 @@ schematic-mesher = "0.2.0"
 quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
-# `--pack`: read the zip and its JSON model files. Both are already in the
-# dependency graph behind nucleation, so this adds no new crate to compile.
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
-serde_json = "1"
-
 # Image encoding for the kitty protocol payload.
 png = "0.17"
 base64 = "0.22"

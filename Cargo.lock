@@ -1038,8 +1038,6 @@ dependencies = [
  "png 0.17.16",
  "quartz_nbt",
  "schematic-mesher",
- "serde_json",
- "zip",
 ]
 
 [[package]]
