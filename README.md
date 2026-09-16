@@ -4,15 +4,27 @@
 
 ![demo](/img/demo.png)
 
-[These formats](#supported-formats) are supported.
+## Supported Formats
+
+| Extension | File format |
+| --- | --- |
+| `.litematic` | Litematica |
+| `.schem` | Sponge schematic |
+| `.schematic` | MCEdit |
+| `.nbt` | Java structure block |
+| `.snbt` | Structure SNBT |
+| `.mcstructure` | Bedrock structure |
+| `.nusn` | Nucleation snapshot |
+
 
 ## Install
 
 ```sh
-cargo install schematic-diff
+cargo install schematic-diff              # rust natively
+brew install arcadi4/tap/schematic-diff   # homebrew
 ```
 
-Image output requires the kitty image protocol. This is known implemented by the following terminal emulators:
+Image output requires the kitty image protocol. This is known to be implemented by the following terminal emulators:
 
 - Kitty
 - Ghostty
@@ -24,7 +36,7 @@ There are more. Check your terminal's docs.
 
 ## Set up git
 
-For this to take effect in the native `git diff` command, you will have to set `schematic-diff` as an external diff program.
+For this to work with the native `git diff` command, set `schematic-diff` as an external diff program.
 
 YOLO setup script:
 
@@ -42,7 +54,7 @@ cat >> ~/.config/git/attributes <<'EOF'
 EOF
 ```
 
-Or write the config files manutally, in `~/.gitconfig`, define the renderer:
+Or write the config files manually in `~/.gitconfig` and define the renderer:
 
 ```ini
 [diff "schematic"]
@@ -86,30 +98,18 @@ Should print `schematic-diff` and `build.litematic: diff: schematic`.
 
 ## Textures
 
-Without `--pack` every block renders as a flat cube with pure color. For better expirience, you will have to bring your own vanilla textures and pass it with `--pack`. We cannot redistribute Mojang's assets in the binary.
+Without `--pack`, every block renders as a flat cube with pure color. For a better experience, please bring your own vanilla textures and pass them with `--pack`. We cannot redistribute Mojang's assets in the binary.
 
 ![no resource pack](/img/no-pack.png)
 
 > Just like this
 
-Once you've got the resource pack, configure your `~/.gitconfig` as following instead:
+Once you've got the resource pack, configure your `~/.gitconfig` as follows instead:
 
 ```ini
 [diff "schematic"]
     command = schematic-diff --pack path/to/pack
 ```
-
-## Supported Formats
-
-| Extension | File format |
-| --- | --- |
-| `.litematic` | Litematica |
-| `.schem` | Sponge schematic |
-| `.schematic` | MCEdit |
-| `.nbt` | Java structure block |
-| `.snbt` | Structure SNBT |
-| `.mcstructure` | Bedrock structure |
-| `.nusn` | Nucleation snapshot |
 
 ## Acknowledgements
 
