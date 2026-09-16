@@ -32,9 +32,11 @@ mod render;
 mod terminal;
 
 use std::io::Write;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use bpaf::Bpaf;
 use nucleation::diff::{Diff, DiffSpec, diff};
 use nucleation::fingerprint::FingerprintSpec;
 use nucleation::{BlockState, UniversalSchematic};
@@ -50,6 +52,100 @@ use crate::terminal::Output;
 /// Git's stand-in for a side that does not exist.
 const DEV_NULL: &str = "/dev/null";
 
+/// Parse one `--yaw`/`--pitch` value, naming the flag it came from.
+fn parse_angle(flag: &'static str) -> impl Fn(String) -> Result<f32, String> + Clone {
+    move |raw: String| {
+        raw.trim()
+            .parse::<f32>()
+            .map_err(|_| format!("{flag} expects a number, got {raw:?}"))
+    }
+}
+
+/// Parse `--zoom`, which additionally must be positive.
+fn parse_zoom(raw: String) -> Result<f32, String> {
+    parse_angle("--zoom")(raw)
+        .and_then(|zoom| {
+            (zoom > 0.0)
+                .then_some(zoom)
+                .ok_or_else(|| "--zoom must be greater than zero".to_string())
+        })
+}
+
+/// render Minecraft schematic diffs in the terminal
+///
+/// This is an external diff: git calls it, it is not run directly.
+///     git config diff.schematic.command schematic-diff
+///     git diff
+///
+/// One file across two revisions, or two files on disk:
+///     git diff <rev1>:<path> <rev2>:<path>
+///     git diff --no-index <before> <after>
+///
+/// SUPPORTED FORMATS:
+///     .litematic  .schem  .schematic  .nbt  .snbt  .mcstructure  .nusn
+///
+/// GIT SETUP:
+///     git config --global diff.schematic.command schematic-diff
+///     printf '*.litematic diff=schematic\n' >> ~/.config/git/attributes
+///
+///     Every extension listed above needs its own line in that attributes file.
+///     Files without one keep git's normal text diff.
+///
+/// ENVIRONMENT:
+///     SCHEMATIC_DIFF_KITTY=1|0  Force image output on or off
+#[derive(Clone, Debug, Bpaf)]
+#[bpaf(options, version(env!("CARGO_PKG_VERSION")))]
+struct Cli {
+    /// camera horizontal angle, in degrees
+    #[bpaf(
+        long("yaw"),
+        argument::<String>("DEGREES"),
+        parse(parse_angle("--yaw")),
+        fallback(Camera::default().yaw_deg),
+        display_fallback
+    )]
+    yaw: f32,
+    /// camera elevation above the build, in degrees
+    #[bpaf(
+        long("pitch"),
+        argument::<String>("DEGREES"),
+        parse(parse_angle("--pitch")),
+        fallback(Camera::default().pitch_deg),
+        display_fallback
+    )]
+    pitch: f32,
+    /// camera zoom; larger zooms in
+    #[bpaf(
+        long("zoom"),
+        argument::<String>("FACTOR"),
+        parse(parse_zoom),
+        fallback(Camera::default().zoom),
+        display_fallback
+    )]
+    zoom: f32,
+    /// take block colours from a resource pack
+    #[bpaf(long("pack"), argument("PACK"))]
+    pack: Option<PathBuf>,
+    /// draw the image even if the terminal is unrecognised
+    #[bpaf(switch)]
+    kitty: bool,
+    /// never draw the image, print the text summary only
+    #[bpaf(long("no-kitty"), switch)]
+    no_kitty: bool,
+    /// also write the composited image as a PNG
+    #[bpaf(long("output"), argument("FILE"))]
+    output: Option<PathBuf>,
+    /// show the version and exit
+    #[bpaf(long("version"), short('V'), switch, hide)]
+    version: bool,
+    /// git's seven per-path arguments:
+    /// path old-file old-hex old-mode new-file new-hex new-mode
+    /// (`git diff --no-index` appends two more; the leading seven keep
+    /// their meaning, so they are read the same way)
+    #[bpaf(positional("REST"))]
+    rest: Vec<OsString>,
+}
+
 /// Category colours, the single source of truth for the pixels showing a change
 /// and the caption text naming it, so the legend cannot drift from what it
 /// describes.
@@ -64,46 +160,15 @@ const CAPTION_TEXT: [u8; 3] = [222, 226, 234];
 const ADDED_TEXT: [u8; 3] = [146, 208, 80];
 const REMOVED_TEXT: [u8; 3] = [228, 138, 133];
 
-const USAGE: &str = "\
-schematic-diff — render Minecraft schematic diffs in the terminal
-
-USAGE:
-    This is an external diff: git calls it, it is not run directly.
-        git config diff.schematic.command schematic-diff
-        git diff
-
-    One file across two revisions, or two files on disk:
-        git diff <rev1>:<path> <rev2>:<path>
-        git diff --no-index <before> <after>
-
-SUPPORTED FORMATS:
-    .litematic  .schem  .schematic  .nbt  .snbt  .mcstructure  .nusn
-
-OPTIONS:
-    --yaw=<degrees>     Camera horizontal angle            [default: 45]
-    --pitch=<degrees>   Camera elevation above the build   [default: 30]
-    --zoom=<factor>     Larger zooms in                    [default: 1.0]
-    --pack=<file.zip>   Take block colours from a resource pack
-    --kitty             Draw the image even if the terminal is unrecognised
-    --no-kitty          Never draw the image, print the text summary only
-    --output=<file>     Also write the composited image as a PNG
-    -h, --help          Show this help
-    -V, --version       Show the version
-
-GIT SETUP:
-    git config --global diff.schematic.command schematic-diff
-    printf '*.litematic diff=schematic\\n' >> ~/.config/git/attributes
-
-    Every extension listed above needs its own line in that attributes file.
-    Files without one keep git's normal text diff.
-
-ENVIRONMENT:
-    SCHEMATIC_DIFF_KITTY=1|0  Force image output on or off
-";
-
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        // `--help`/`--version` from the parser: the output goes to stdout,
+        // exit 0 — the same split `bpaf` itself makes.
+        Err(Error::HelpExit(failure)) => {
+            failure.print_message(100);
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("schematic-diff: {error}");
             ExitCode::FAILURE
@@ -149,7 +214,7 @@ impl Invocation {
 }
 
 fn run() -> Result<()> {
-    let Some(invocation) = parse_args(std::env::args().skip(1).collect())? else {
+    let Some(invocation) = parse_args()? else {
         return Ok(());
     };
 
@@ -672,66 +737,58 @@ fn no_image_reason(invocation: &Invocation, output: &Output) -> String {
         .to_string()
 }
 
-/// Parse the command line, returning `None` for `--help`/`--version`.
-fn parse_args(args: Vec<String>) -> Result<Option<Invocation>> {
-    let mut positional: Vec<String> = Vec::new();
-    let mut camera = Camera::default();
-    let mut pack = None;
-    let mut kitty = None;
-    let mut output = None;
-
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                print!("{USAGE}");
-                return Ok(None);
-            }
-            "-V" | "--version" => {
-                println!("schematic-diff {}", env!("CARGO_PKG_VERSION"));
-                return Ok(None);
-            }
-            "--kitty" => {
-                kitty = Some(true);
-                continue;
-            }
-            "--no-kitty" => {
-                kitty = Some(false);
-                continue;
-            }
-            _ => {}
-        }
-        if let Some(value) = arg.strip_prefix("--yaw=") {
-            camera.yaw_deg = number(value, "--yaw")?;
-        } else if let Some(value) = arg.strip_prefix("--pitch=") {
-            camera.pitch_deg = number(value, "--pitch")?;
-        } else if let Some(value) = arg.strip_prefix("--zoom=") {
-            let zoom = number(value, "--zoom")?;
-            if zoom <= 0.0 {
-                return Err(Error::message("--zoom must be greater than zero"));
-            }
-            camera.zoom = zoom;
-        } else if let Some(value) = arg.strip_prefix("--pack=") {
-            pack = Some(expand_tilde(value));
-        } else if let Some(value) = arg.strip_prefix("--output=") {
-            output = Some(expand_tilde(value));
-        } else if arg.starts_with('-') && arg.len() > 1 && !Path::new(&arg).exists() {
-            return Err(Error::message(format!("unknown option {arg:?}")));
-        } else {
-            positional.push(arg);
-        }
+/// Parse the command line, returning `None` for `--version`.
+///
+/// `--help` and parse failures never return: `run_inner` reports them through
+/// [`Error`], and `main` prints the held `--help` output to stdout (exit 0)
+/// or the failure to stderr (exit 1). Failures the derive cannot express —
+/// git's 7-or-9 positionals — stay as checks below.
+fn parse_args() -> Result<Option<Invocation>> {
+    // `run_inner` rather than `run`: this keeps `--help` and parse failures
+    // inside `Result`, so `main` owns the exit path and `--help` stays text
+    // on stdout instead of a process exit buried in the parser.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let refs: Vec<&str> = args
+        .iter()
+        .map(|arg| {
+            arg.to_str().ok_or_else(|| {
+                Error::message(format!("argument is not valid unicode: {}", arg.to_string_lossy()))
+            })
+        })
+        .collect::<Result<_>>()?;
+    let cli: Cli = cli().run_inner(&refs[..])?;
+    if cli.version {
+        println!("schematic-diff {}", env!("CARGO_PKG_VERSION"));
+        return Ok(None);
     }
+    let camera = Camera {
+        yaw_deg: cli.yaw,
+        pitch_deg: cli.pitch,
+        zoom: cli.zoom,
+    };
+    let pack = cli.pack.as_deref().map(expand_tilde_path);
+    let output = cli.output.as_deref().map(expand_tilde_path);
+    // `--kitty --kitty` is rejected by the parser, so both set means one of
+    // each: last flag wins, resolved by re-scanning the raw arguments.
+    let kitty = match (cli.kitty, cli.no_kitty) {
+        (true, true) => last_kitty_flag(&args),
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    };
 
-    let (display_path, before, after) = match positional.len() {
+    let (display_path, before, after) = match cli.rest.len() {
         // Git's seven arguments. `git diff --no-index` appends two more — the
         // second path and the index line — and the leading seven keep their
         // meaning, so they are read the same way.
         7 | 9 => {
-            let mut values = positional.into_iter();
+            let mut values = cli.rest.into_iter();
             let path = values.next().unwrap();
+            let display_path = path.to_string_lossy().into_owned();
             let old_file = values.next().unwrap();
             // Skip `<old-hex>` and `<old-mode>`.
             let new_file = values.nth(2).unwrap();
-            (path, side_path(&old_file), side_path(&new_file))
+            (display_path, side_path(&old_file), side_path(&new_file))
         }
         count => {
             return Err(Error::message(format!(
@@ -765,34 +822,40 @@ fn parse_args(args: Vec<String>) -> Result<Option<Invocation>> {
     }))
 }
 
+/// Which of `--kitty`/`--no-kitty` came last on the command line.
+fn last_kitty_flag(args: &[OsString]) -> Option<bool> {
+    args.iter()
+        .filter_map(|arg| arg.to_str())
+        .filter(|arg| *arg == "--kitty" || *arg == "--no-kitty")
+        .last()
+        .map(|arg| arg == "--kitty")
+}
+
+/// Treat git's `/dev/null` placeholder as "this side does not exist".
+fn side_path(raw: &OsStr) -> Option<PathBuf> {
+    (raw != OsStr::new(DEV_NULL)).then(|| PathBuf::from(raw))
+}
+
 /// Expand a leading `~` in a user-supplied path.
 ///
 /// The command line usually reaches this tool from a git config string, where
 /// `--pack=~/pack.zip` looks right but arrives literally: a shell only expands
 /// `~` at the start of a word, and here it follows the `=`. Expanding it here is
 /// what lets a config keep the home-relative path a person would write.
-fn expand_tilde(raw: &str) -> PathBuf {
-    let rest = raw.strip_prefix("~/").or_else(|| raw.strip_prefix('~'));
+fn expand_tilde_path(path: &Path) -> PathBuf {
+    let raw = path.as_os_str();
+    let rest = raw
+        .to_str()
+        .and_then(|s| s.strip_prefix("~/").or_else(|| s.strip_prefix('~')));
     match (rest, std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => {
-            let mut path = PathBuf::from(home);
+            let mut expanded = PathBuf::from(home);
             if !rest.is_empty() {
-                path.push(rest);
+                expanded.push(rest);
             }
-            path
+            expanded
         }
         _ => PathBuf::from(raw),
     }
 }
 
-fn number(value: &str, flag: &str) -> Result<f32> {
-    value
-        .trim()
-        .parse::<f32>()
-        .map_err(|_| Error::message(format!("{flag} expects a number, got {value:?}")))
-}
-
-/// Treat git's `/dev/null` placeholder as "this side does not exist".
-fn side_path(raw: &str) -> Option<PathBuf> {
-    (raw != DEV_NULL).then(|| PathBuf::from(raw))
-}

@@ -38,6 +38,10 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 png = "0.17"
 base64 = "0.22"
 
+# Command-line parsing and `--help`, derived from one struct so the two cannot
+# drift. `bpaf` supports both `--flag=value` and `--flag value`, unlike argh.
+bpaf = { version = "0.9", features = ["derive"] }
+
 # `TIOCGWINSZ`, for the terminal's size and its cell dimensions in pixels.
 libc = "0.2"
 
