@@ -1,6 +1,6 @@
 [package]
 name = "schematic-diff"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 description = "git diff extension for Minecraft schematic & NBT files"
@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/Arcadi4/schematic-diff"
 homepage = "https://github.com/Arcadi4/schematic-diff"
 readme = "README.md"
-keywords = ["minecraft", "schematic", "git", "diff", "kitty", "cli", "terminal"]
+keywords = ["minecraft", "git", "diff", "cli", "terminal"]
 categories = ["command-line-utilities", "graphics"]
 
 [[bin]]
@@ -28,7 +28,7 @@ path = "src/main.rs"
 # `schematic-mesher 0.2.0` predates it. Every release through 0.10.24 fails for
 # registry consumers; 0.10.14 is the last one where the feature compiles.
 nucleation = { version = "=0.10.14", default-features = false, features = [
-    "meshing",
+  "meshing",
 ] }
 # The mesher nucleation's `meshing` feature uses. Taken directly as well, so the
 schematic-mesher = "0.2.0"
