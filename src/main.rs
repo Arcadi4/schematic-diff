@@ -31,12 +31,13 @@ mod raster;
 mod render;
 mod terminal;
 
-use std::io::Write;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use bpaf::Bpaf;
+use bpaf::{Bpaf, Parser, construct, long};
 use nucleation::diff::{Diff, DiffSpec, diff};
 use nucleation::fingerprint::FingerprintSpec;
 use nucleation::{BlockState, UniversalSchematic};
@@ -73,14 +74,13 @@ fn parse_zoom(raw: String) -> Result<f32, String> {
 
 /// render Minecraft schematic diffs in the terminal
 ///
-/// This is an external diff: git calls it, it is not run directly.
+/// Inspect a schematic or diff two schematics directly:
+///     schematic-diff <file>
+///     schematic-diff <before> <after>
+///
+/// Or use as git's external diff:
 ///     git config diff.schematic.command schematic-diff
 ///     git diff
-///
-/// One file across two revisions, or two files on disk:
-///     git diff <rev1>:<path> <rev2>:<path>
-///     git diff --no-index <before> <after>
-///
 /// SUPPORTED FORMATS:
 ///     .litematic  .schem  .schematic  .nbt  .snbt  .mcstructure  .nusn
 ///
@@ -93,6 +93,29 @@ fn parse_zoom(raw: String) -> Result<f32, String> {
 ///
 /// ENVIRONMENT:
 ///     SCHEMATIC_DIFF_KITTY=1|0  Force image output on or off
+/// How `--stat` formats its output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatMode {
+    /// Print all blocks without truncation.
+    Uncapped,
+    /// Print at most `count` entries, noting the remainder.
+    Capped(usize),
+}
+
+fn stat_parser() -> impl Parser<Option<StatMode>> {
+    let with_val = long("stat")
+        .help("print a block-level breakdown of materials or changes (optional COUNT limit)")
+        .argument::<usize>("COUNT")
+        .map(StatMode::Capped)
+        .map(Some);
+
+    let just_flag = long("stat")
+        .help("print a block-level breakdown of materials or changes")
+        .req_flag(Some(StatMode::Uncapped));
+
+    construct!([with_val, just_flag]).fallback(None)
+}
+
 #[derive(Clone, Debug, Bpaf)]
 #[bpaf(options, version(env!("CARGO_PKG_VERSION")))]
 struct Cli {
@@ -135,14 +158,14 @@ struct Cli {
     /// also write the composited image as a PNG
     #[bpaf(long("output"), argument("FILE"))]
     output: Option<PathBuf>,
+    /// print a block-level breakdown of materials or changes
+    #[bpaf(external(stat_parser))]
+    stat: Option<StatMode>,
     /// show the version and exit
     #[bpaf(long("version"), short('V'), switch, hide)]
     version: bool,
-    /// git's seven per-path arguments:
-    /// path old-file old-hex old-mode new-file new-hex new-mode
-    /// (`git diff --no-index` appends two more; the leading seven keep
-    /// their meaning, so they are read the same way)
-    #[bpaf(positional("REST"))]
+    /// schematic files to inspect or diff, or git's seven per-path arguments
+    #[bpaf(positional("PATH"))]
     rest: Vec<OsString>,
 }
 
@@ -178,7 +201,7 @@ fn main() -> ExitCode {
 
 /// A parsed command line.
 struct Invocation {
-    /// The repo-relative path git reported, used as the heading.
+    /// The path or paths being compared, used as the heading.
     display_path: String,
     before: Option<PathBuf>,
     after: Option<PathBuf>,
@@ -187,6 +210,8 @@ struct Invocation {
     /// `Some(true)` forces the image on, `Some(false)` off, `None` detects.
     kitty: Option<bool>,
     output: Option<PathBuf>,
+    stat: Option<StatMode>,
+    standalone: bool,
 }
 
 impl Invocation {
@@ -313,8 +338,25 @@ fn run() -> Result<()> {
     // The image occupies everything above the text, so that is the area it is
     // laid out for. One spare row keeps the last text line from scrolling the
     // image, since a placed image scrolls with the text it sits over.
-    let text_lines = summary_lines(&before, &after, pack.is_some());
-    let image_cells = output.screen.rows.saturating_sub(text_lines + 1).max(8);
+    let stat = match invocation.stat {
+        Some(mode) => format_stat(&before, &after, changes.as_ref(), invocation.standalone, mode),
+        None => Vec::new(),
+    };
+
+    let text_lines = summary_lines(
+        &before,
+        &after,
+        pack.is_some(),
+        stat.len() as u32,
+        invocation.standalone,
+    );
+    let fit_height = output.screen.rows.saturating_sub(text_lines + 1);
+    let default_height = (output.screen.rows.saturating_sub(5)).max(18);
+    let image_cells = if fit_height >= 12 {
+        fit_height
+    } else {
+        default_height
+    };
     let (width, height) = output.image_pixels(image_cells);
     let columns = output.screen.columns;
 
@@ -362,11 +404,12 @@ fn run() -> Result<()> {
 
     write_details(
         &mut output,
-        invocation.pack.as_ref(),
+        &invocation,
         &before,
         &after,
         &changes,
         pack.as_ref(),
+        &stat,
     )?;
     output.flush()?;
 
@@ -604,16 +647,22 @@ fn compose_image(invocation: &Invocation, scene: &Scene<'_>, layout: Layout) -> 
                 panels.push(Panel::legend(change_legend(), changes));
             }
         }
-        (None, Some(after)) => panels.push(Panel::new(
-            format!("ADDED  {after_name}"),
-            ADDED_TEXT,
-            after,
-        )),
-        (Some(before), None) => panels.push(Panel::new(
-            format!("DELETED  {before_name}"),
-            REMOVED_TEXT,
-            before,
-        )),
+        (None, Some(after)) => {
+            let (label, color) = if invocation.standalone {
+                (after_name, CAPTION_TEXT)
+            } else {
+                (format!("ADDED  {after_name}"), ADDED_TEXT)
+            };
+            panels.push(Panel::new(label, color, after));
+        }
+        (Some(before), None) => {
+            let (label, color) = if invocation.standalone {
+                (before_name, CAPTION_TEXT)
+            } else {
+                (format!("DELETED  {before_name}"), REMOVED_TEXT)
+            };
+            panels.push(Panel::new(label, color, before));
+        }
         (None, None) => {}
     }
 
@@ -634,8 +683,19 @@ fn change_legend() -> Vec<Segment> {
 
 /// How many lines the summary prints: the heading, one line per side that
 /// loaded, the change tally, and the pack line when one was given.
-fn summary_lines(before: &Option<Loaded>, after: &Option<Loaded>, pack: bool) -> u32 {
-    2 + u32::from(before.is_some()) + u32::from(after.is_some()) + u32::from(pack)
+fn summary_lines(
+    before: &Option<Loaded>,
+    after: &Option<Loaded>,
+    pack: bool,
+    stat_lines: u32,
+    standalone: bool,
+) -> u32 {
+    let base = if standalone && (before.is_none() || after.is_none()) {
+        2
+    } else {
+        2 + u32::from(before.is_some()) + u32::from(after.is_some())
+    };
+    base + u32::from(pack) + stat_lines
 }
 
 /// The line naming the path and what happened to it.
@@ -645,6 +705,9 @@ fn write_heading(
     before: &Option<Loaded>,
     after: &Option<Loaded>,
 ) -> std::io::Result<()> {
+    if invocation.standalone && (before.is_none() || after.is_none()) {
+        return writeln!(out, "{}", invocation.display_path);
+    }
     let status = match (before.is_some(), after.is_some()) {
         (false, true) => "added",
         (true, false) => "deleted",
@@ -656,40 +719,44 @@ fn write_heading(
 /// What each side held, what changed between them, and what the pack contained.
 fn write_details(
     out: &mut impl Write,
-    pack_path: Option<&PathBuf>,
+    invocation: &Invocation,
     before: &Option<Loaded>,
     after: &Option<Loaded>,
     changes: &Option<Diff>,
     pack: Option<&Pack>,
+    stat: &[String],
 ) -> std::io::Result<()> {
-    if let Some(loaded) = before {
-        writeln!(out, "  before  {}", describe(loaded))?;
-    }
-    if let Some(loaded) = after {
-        writeln!(out, "  after   {}", describe(loaded))?;
+    if invocation.standalone && (before.is_none() || after.is_none()) {
+        let loaded = after.as_ref().or(before.as_ref()).unwrap();
+        writeln!(out, "  build   {}", describe(loaded))?;
+    } else {
+        if let Some(loaded) = before {
+            writeln!(out, "  before  {}", describe(loaded))?;
+        }
+        if let Some(loaded) = after {
+            writeln!(out, "  after   {}", describe(loaded))?;
+        }
+
+        match changes {
+            Some(changes) => writeln!(
+                out,
+                "  changes +{} added, -{} removed, ~{} changed, {} re-paletted \
+                 ({}% of cells aligned)",
+                changes.added.len(),
+                changes.removed.len(),
+                changes.changed.len(),
+                changes.swapped.len(),
+                (changes.support * 100.0).round() as i32,
+            )?,
+            None => writeln!(out, "  changes not computed (only one side exists)")?,
+        }
     }
 
-    match changes {
-        Some(changes) => writeln!(
-            out,
-            "  changes +{} added, -{} removed, ~{} changed, {} re-paletted \
-             ({}% of cells aligned)",
-            changes.added.len(),
-            changes.removed.len(),
-            changes.changed.len(),
-            changes.swapped.len(),
-            (changes.support * 100.0).round() as i32,
-        )?,
-        None => writeln!(out, "  changes not computed (only one side exists)")?,
-    }
-
-    // Reported because `--pack` is the one argument whose failure is silent: a
-    // pack that loads but covers nothing renders every block in the fallback
-    // colour, which is indistinguishable from the flag being ignored. These
-    // counts say the pack was read and has content.
     if let Some(pack) = pack {
         let stats = pack.stats();
-        let path = pack_path
+        let path = invocation
+            .pack
+            .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
         writeln!(
@@ -698,7 +765,205 @@ fn write_details(
             stats.blockstate_count, stats.model_count, stats.texture_count,
         )?;
     }
+
+    for line in stat {
+        writeln!(out, "{line}")?;
+    }
     Ok(())
+}
+
+/// Block-level breakdown of materials or changes.
+fn format_stat(
+    before: &Option<Loaded>,
+    after: &Option<Loaded>,
+    changes: Option<&Diff>,
+    standalone: bool,
+    mode: StatMode,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    match (before, after) {
+        (Some(_), Some(_)) => {
+            let Some(changes) = changes else {
+                lines.push("  stat".to_string());
+                lines.push("    (no changes)".to_string());
+                return lines;
+            };
+
+            let mut added_counts: HashMap<&str, usize> = HashMap::new();
+            for (_, block) in &changes.added {
+                *added_counts.entry(block.get_name()).or_default() += 1;
+            }
+
+            let mut removed_counts: HashMap<&str, usize> = HashMap::new();
+            for (_, block) in &changes.removed {
+                *removed_counts.entry(block.get_name()).or_default() += 1;
+            }
+
+            let mut changed_counts: HashMap<(&str, Option<&str>), usize> = HashMap::new();
+            for (_, was, now) in changes.changed.iter().chain(changes.swapped.iter()) {
+                let was_name = was.get_name();
+                let now_name = now.get_name();
+                let key = if was_name == now_name {
+                    (was_name, None)
+                } else {
+                    (was_name, Some(now_name))
+                };
+                *changed_counts.entry(key).or_default() += 1;
+            }
+
+            enum StatEntry<'a> {
+                Added { count: usize, name: &'a str },
+                Removed { count: usize, name: &'a str },
+                Modified {
+                    count: usize,
+                    was: &'a str,
+                    now: Option<&'a str>,
+                },
+            }
+
+            let mut items: Vec<StatEntry<'_>> = Vec::new();
+            for (name, count) in added_counts {
+                items.push(StatEntry::Added { count, name });
+            }
+            for (name, count) in removed_counts {
+                items.push(StatEntry::Removed { count, name });
+            }
+            for ((was, now), count) in changed_counts {
+                items.push(StatEntry::Modified { count, was, now });
+            }
+
+            if items.is_empty() {
+                lines.push("  stat".to_string());
+                lines.push("    (no block differences)".to_string());
+                return lines;
+            }
+
+            items.sort_unstable_by(|a, b| {
+                let (count_a, label_a) = match a {
+                    StatEntry::Added { count, name } => (*count, *name),
+                    StatEntry::Removed { count, name } => (*count, *name),
+                    StatEntry::Modified { count, was, .. } => (*count, *was),
+                };
+                let (count_b, label_b) = match b {
+                    StatEntry::Added { count, name } => (*count, *name),
+                    StatEntry::Removed { count, name } => (*count, *name),
+                    StatEntry::Modified { count, was, .. } => (*count, *was),
+                };
+                count_b.cmp(&count_a).then_with(|| label_a.cmp(label_b))
+            });
+
+            lines.push("  stat".to_string());
+            let max_count_len = items
+                .iter()
+                .map(|item| match item {
+                    StatEntry::Added { count, .. }
+                    | StatEntry::Removed { count, .. }
+                    | StatEntry::Modified { count, .. } => count.to_string().len(),
+                })
+                .max()
+                .unwrap_or(1);
+
+            let (visible, remaining) = match mode {
+                StatMode::Uncapped => (&items[..], 0),
+                StatMode::Capped(cap) => {
+                    if items.len() <= cap {
+                        (&items[..], 0)
+                    } else {
+                        (&items[..cap], items.len() - cap)
+                    }
+                }
+            };
+
+            for item in visible {
+                let line = match item {
+                    StatEntry::Added { count, name } => {
+                        format!("    + {:>width$}  {name}", count, width = max_count_len)
+                    }
+                    StatEntry::Removed { count, name } => {
+                        format!("    - {:>width$}  {name}", count, width = max_count_len)
+                    }
+                    StatEntry::Modified {
+                        count,
+                        was,
+                        now: None,
+                    } => {
+                        format!("    ~ {:>width$}  {was} (state)", count, width = max_count_len)
+                    }
+                    StatEntry::Modified {
+                        count,
+                        was,
+                        now: Some(now),
+                    } => {
+                        format!("    ~ {:>width$}  {was} -> {now}", count, width = max_count_len)
+                    }
+                };
+                lines.push(line);
+            }
+
+            if remaining > 0 {
+                lines.push(format!("    ... and {remaining} more block changes"));
+            }
+        }
+        (None, Some(after)) => {
+            let prefix = if standalone { "" } else { "+ " };
+            format_palette_stat(&mut lines, after, prefix, mode);
+        }
+        (Some(before), None) => {
+            let prefix = if standalone { "" } else { "- " };
+            format_palette_stat(&mut lines, before, prefix, mode);
+        }
+        (None, None) => {}
+    }
+    lines
+}
+
+fn format_palette_stat(lines: &mut Vec<String>, loaded: &Loaded, prefix: &str, mode: StatMode) {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for (_, block) in loaded.schematic.iter_blocks() {
+        if !render::is_air(block) {
+            *counts.entry(block.get_name()).or_default() += 1;
+        }
+    }
+
+    lines.push("  stat".to_string());
+    if counts.is_empty() {
+        lines.push("    (empty schematic)".to_string());
+        return;
+    }
+
+    let mut items: Vec<(&str, usize)> = counts.into_iter().collect();
+    items.sort_unstable_by(|(name_a, count_a), (name_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| name_a.cmp(name_b))
+    });
+
+    let max_count_len = items
+        .iter()
+        .map(|(_, count)| count.to_string().len())
+        .max()
+        .unwrap_or(1);
+
+    let (visible, remaining) = match mode {
+        StatMode::Uncapped => (&items[..], 0),
+        StatMode::Capped(cap) => {
+            if items.len() <= cap {
+                (&items[..], 0)
+            } else {
+                (&items[..cap], items.len() - cap)
+            }
+        }
+    };
+
+    for (name, count) in visible {
+        lines.push(format!(
+            "    {prefix}{:>width$}  {name}",
+            count,
+            width = max_count_len
+        ));
+    }
+
+    if remaining > 0 {
+        lines.push(format!("    ... and {remaining} more block types"));
+    }
 }
 
 /// One side's size, block count and provenance, for the summary.
@@ -777,7 +1042,26 @@ fn parse_args() -> Result<Option<Invocation>> {
         (false, false) => None,
     };
 
-    let (display_path, before, after) = match cli.rest.len() {
+    let (display_path, before, after, standalone) = match cli.rest.len() {
+        1 => {
+            let path = PathBuf::from(cli.rest.into_iter().next().unwrap());
+            let display_path = path.to_string_lossy().into_owned();
+            (display_path, None, Some(path), true)
+        }
+        2 => {
+            let mut values = cli.rest.into_iter();
+            let old_file = values.next().unwrap();
+            let new_file = values.next().unwrap();
+            let before = side_path(&old_file);
+            let after = side_path(&new_file);
+            let display_path = match (&before, &after) {
+                (Some(b), Some(a)) => format!("{} -> {}", b.display(), a.display()),
+                (Some(b), None) => b.display().to_string(),
+                (None, Some(a)) => a.display().to_string(),
+                (None, None) => format!("{DEV_NULL} -> {DEV_NULL}"),
+            };
+            (display_path, before, after, true)
+        }
         // Git's seven arguments. `git diff --no-index` appends two more — the
         // second path and the index line — and the leading seven keep their
         // meaning, so they are read the same way.
@@ -788,16 +1072,16 @@ fn parse_args() -> Result<Option<Invocation>> {
             let old_file = values.next().unwrap();
             // Skip `<old-hex>` and `<old-mode>`.
             let new_file = values.nth(2).unwrap();
-            (display_path, side_path(&old_file), side_path(&new_file))
+            (display_path, side_path(&old_file), side_path(&new_file), false)
         }
         count => {
             return Err(Error::message(format!(
-                "expected 7 arguments from git, got {count}\n\n\
-                 This tool is an external diff: git calls it, it is not called \
-                 directly. To compare one file across two revisions:\n    \
-                 git diff <rev1>:<path> <rev2>:<path>\n\
-                 To compare two files on disk:\n    \
-                 git diff --no-index <before> <after>"
+                "expected 1 or 2 file paths, or 7 arguments from git, got {count}\n\n\
+                 Usage:\n    \
+                 schematic-diff <file>                  Inspect a single schematic\n    \
+                 schematic-diff <before> <after>        Diff two schematics directly\n    \
+                 git diff <rev1>:<path> <rev2>:<path>   Diff revisions via git\n    \
+                 git diff --no-index <before> <after>   Diff files via git"
             )));
         }
     };
@@ -819,16 +1103,17 @@ fn parse_args() -> Result<Option<Invocation>> {
         pack,
         kitty,
         output,
+        stat: cli.stat,
+        standalone,
     }))
 }
-
 /// Which of `--kitty`/`--no-kitty` came last on the command line.
 fn last_kitty_flag(args: &[OsString]) -> Option<bool> {
-    args.iter()
-        .filter_map(|arg| arg.to_str())
-        .filter(|arg| *arg == "--kitty" || *arg == "--no-kitty")
-        .last()
-        .map(|arg| arg == "--kitty")
+    args.iter().rev().find_map(|arg| match arg.to_str()? {
+        "--kitty" => Some(true),
+        "--no-kitty" => Some(false),
+        _ => None,
+    })
 }
 
 /// Treat git's `/dev/null` placeholder as "this side does not exist".
