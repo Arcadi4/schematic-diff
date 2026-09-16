@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/Arcadi4/schematic-diff"
 homepage = "https://github.com/Arcadi4/schematic-diff"
 readme = "README.md"
-keywords = ["minecraft", "schematic", "git", "diff", "kitty"]
+keywords = ["minecraft", "schematic", "git", "diff", "kitty", "cli", "terminal"]
 categories = ["command-line-utilities", "graphics"]
 
 [[bin]]
@@ -27,7 +27,9 @@ path = "src/main.rs"
 # own CI passes — but `cargo publish` resolves the version side, and published
 # `schematic-mesher 0.2.0` predates it. Every release through 0.10.24 fails for
 # registry consumers; 0.10.14 is the last one where the feature compiles.
-nucleation = { version = "=0.10.14", default-features = false, features = ["meshing"] }
+nucleation = { version = "=0.10.14", default-features = false, features = [
+    "meshing",
+] }
 # The mesher nucleation's `meshing` feature uses. Taken directly as well, so the
 schematic-mesher = "0.2.0"
 
