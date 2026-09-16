@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.*'
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name for the release (e.g. v0.1.0)'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve-tag.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve and verify tag
+        id: resolve-tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          RELEASE_TAG="$INPUT_TAG"
+          if [ -z "$RELEASE_TAG" ]; then
+            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              RELEASE_TAG="$GITHUB_REF_NAME"
+            else
+              echo "::error::No tag specified and workflow was not triggered by a tag push."
+              exit 1
+            fi
+          fi
+
+          TAG_VERSION="${RELEASE_TAG#v}"
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version '$TAG_VERSION' does not match Cargo.toml version '$CARGO_VERSION'"
+            exit 1
+          fi
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve-tag.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes
+          else
+            echo "Release $TAG already exists; skipping creation."
+          fi
+
+  upload-assets:
+    name: Upload binary (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: universal-apple-darwin
+            os: macos-latest
+            targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets || matrix.target }}
+
+      - name: Setup cross toolchain
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+        if: startsWith(matrix.os, 'ubuntu') && matrix.target != 'x86_64-unknown-linux-gnu'
+
+      - name: Build and upload binary
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: schematic-diff
+          target: ${{ matrix.target }}
+          include: LICENSE,README.md
+          ref: refs/tags/${{ needs.create-release.outputs.tag }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "CARGO_REGISTRY_TOKEN secret is not set; skipping publish to crates.io."
+            exit 0
+          fi
+
+          CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if curl -sf -H "User-Agent: github-actions-release" "https://crates.io/api/v1/crates/schematic-diff/$CRATE_VERSION" >/dev/null; then
+            echo "schematic-diff v$CRATE_VERSION is already published on crates.io; skipping."
+            exit 0
+          fi
+
+          cargo publish
