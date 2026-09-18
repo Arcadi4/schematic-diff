@@ -38,6 +38,7 @@ schematic-mesher = "0.2.0"
 quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
+rayon = "1.11"
 # Image encoding for the kitty protocol payload.
 png = "0.17"
 base64 = "0.22"

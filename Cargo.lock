@@ -1058,6 +1058,7 @@ dependencies = [
  "nucleation",
  "png 0.17.16",
  "quartz_nbt",
+ "rayon",
  "schematic-mesher",
 ]
 
