@@ -14,6 +14,7 @@
 //! textures, no model geometry. `--pack` does not come through here; it meshes
 //! the build and draws triangles instead.
 
+use rayon::prelude::*;
 use nucleation::{BlockState, UniversalSchematic};
 
 use crate::error::{Error, Result};
@@ -26,7 +27,7 @@ use crate::raster::Canvas;
 /// `DecodeLimits::max_volume` is 512 M cells — but that bounds what may be
 /// *parsed*, and a grid that large would cost gigabytes to allocate and minutes
 /// to raycast, in a terminal showing the result at roughly 1200x600.
-pub const MAX_CELLS: i64 = 64 * 1024 * 1024;
+pub const MAX_CELLS: i64 = 512 * 1024 * 1024;
 
 /// The cell count a grid over `size` needs, refusing degenerate or
 /// unrepresentable extents.
@@ -445,23 +446,29 @@ pub fn render(grid: &Grid, frame: Bounds, camera: &Camera, width: u32, height: u
         radius,
     };
 
-    for py in 0..height {
-        let v = (0.5 - (py as f32 + 0.5) / height as f32) * 2.0 * tan_half;
-        for px in 0..width {
-            let u = ((px as f32 + 0.5) / width as f32 - 0.5) * 2.0 * tan_half * aspect;
-            let ray = Ray {
-                origin: position,
-                direction: normalize([
-                    forward[0] + right[0] * u + up[0] * v,
-                    forward[1] + right[1] * u + up[1] * v,
-                    forward[2] + right[2] * u + up[2] * v,
-                ]),
-            };
-            if let Some(rgba) = trace(&scene, &ray, max_t) {
-                canvas.set(px, py, rgba);
+    let row_bytes = (width as usize) * 4;
+    canvas
+        .pixels
+        .par_chunks_mut(row_bytes)
+        .enumerate()
+        .for_each(|(py, row)| {
+            let v = (0.5 - (py as f32 + 0.5) / height as f32) * 2.0 * tan_half;
+            for px in 0..width {
+                let u = ((px as f32 + 0.5) / width as f32 - 0.5) * 2.0 * tan_half * aspect;
+                let ray = Ray {
+                    origin: position,
+                    direction: normalize([
+                        forward[0] + right[0] * u + up[0] * v,
+                        forward[1] + right[1] * u + up[1] * v,
+                        forward[2] + right[2] * u + up[2] * v,
+                    ]),
+                };
+                if let Some(rgba) = trace(&scene, &ray, max_t) {
+                    let offset = (px as usize) * 4;
+                    row[offset..offset + 4].copy_from_slice(&rgba);
+                }
             }
-        }
-    }
+        });
 
     canvas
 }
@@ -565,38 +572,86 @@ fn trace(scene: &Scene<'_>, ray: &Ray, max_t: f32) -> Option<[u8; 4]> {
         low[1] + grid.dims[1] as f32,
         low[2] + grid.dims[2] as f32,
     ];
-    let (mut t, far, _) = box_span(low, high, ray.origin, ray.direction, 0.0, max_t)?;
+    let (enter, far, initial_face) = box_span(low, high, ray.origin, ray.direction, 0.0, max_t)?;
+    if enter >= far {
+        return None;
+    }
+
+    let p_enter = [
+        ray.origin[0] + ray.direction[0] * (enter + 1e-4),
+        ray.origin[1] + ray.direction[1] * (enter + 1e-4),
+        ray.origin[2] + ray.direction[2] * (enter + 1e-4),
+    ];
+
+    let mut cx = p_enter[0].floor() as i32;
+    let mut cy = p_enter[1].floor() as i32;
+    let mut cz = p_enter[2].floor() as i32;
+
+    let step_x = if ray.direction[0] > 0.0 { 1 } else { -1 };
+    let step_y = if ray.direction[1] > 0.0 { 1 } else { -1 };
+    let step_z = if ray.direction[2] > 0.0 { 1 } else { -1 };
+
+    let inv_x = if ray.direction[0].abs() > 1e-8 { 1.0 / ray.direction[0] } else { 1e30 };
+    let inv_y = if ray.direction[1].abs() > 1e-8 { 1.0 / ray.direction[1] } else { 1e30 };
+    let inv_z = if ray.direction[2].abs() > 1e-8 { 1.0 / ray.direction[2] } else { 1e30 };
+
+    let t_delta_x = inv_x.abs();
+    let t_delta_y = inv_y.abs();
+    let t_delta_z = inv_z.abs();
+
+    let next_x = if step_x > 0 { cx as f32 + 1.0 } else { cx as f32 };
+    let next_y = if step_y > 0 { cy as f32 + 1.0 } else { cy as f32 };
+    let next_z = if step_z > 0 { cz as f32 + 1.0 } else { cz as f32 };
+
+    let mut t_max_x = (next_x - ray.origin[0]) * inv_x;
+    let mut t_max_y = (next_y - ray.origin[1]) * inv_y;
+    let mut t_max_z = (next_z - ray.origin[2]) * inv_z;
+
+    let mut hit_t = enter;
+    let mut hit_face = initial_face;
 
     loop {
-        if t >= far {
-            return None;
-        }
-        let point = [
-            ray.origin[0] + ray.direction[0] * t,
-            ray.origin[1] + ray.direction[1] * t,
-            ray.origin[2] + ray.direction[2] * t,
-        ];
-        let cell = [
-            point[0].floor() as i32,
-            point[1].floor() as i32,
-            point[2].floor() as i32,
-        ];
-        let cell_min = [cell[0] as f32, cell[1] as f32, cell[2] as f32];
-        let cell_max = [cell_min[0] + 1.0, cell_min[1] + 1.0, cell_min[2] + 1.0];
-        let (_, cell_exit, _) =
-            box_span(cell_min, cell_max, ray.origin, ray.direction, t, far).unwrap_or((t, t, 0));
-
-        if let Some(color) = grid.color_at(cell[0], cell[1], cell[2])
-            && let Some((hit, _, face)) =
-                box_span(cell_min, cell_max, ray.origin, ray.direction, t, cell_exit)
-        {
-            return Some(shade(face, hit, crate::raster::rgb(color), scene));
+        if let Some(color) = grid.color_at(cx, cy, cz) {
+            return Some(shade(hit_face, hit_t, crate::raster::rgb(color), scene));
         }
 
-        // Step into the next cell. The nudge matters on a ray that grazes a
-        // cell boundary exactly, where the exit and the entry coincide and the
-        // walk would otherwise not advance.
-        t = cell_exit + 1e-4;
+        if t_max_x < t_max_y {
+            if t_max_x < t_max_z {
+                if t_max_x >= far {
+                    return None;
+                }
+                hit_t = t_max_x;
+                t_max_x += t_delta_x;
+                cx += step_x;
+                hit_face = if step_x > 0 { 3 } else { 0 };
+            } else {
+                if t_max_z >= far {
+                    return None;
+                }
+                hit_t = t_max_z;
+                t_max_z += t_delta_z;
+                cz += step_z;
+                hit_face = if step_z > 0 { 5 } else { 2 };
+            }
+        } else {
+            if t_max_y < t_max_z {
+                if t_max_y >= far {
+                    return None;
+                }
+                hit_t = t_max_y;
+                t_max_y += t_delta_y;
+                cy += step_y;
+                hit_face = if step_y > 0 { 4 } else { 1 };
+            } else {
+                if t_max_z >= far {
+                    return None;
+                }
+                hit_t = t_max_z;
+                t_max_z += t_delta_z;
+                cz += step_z;
+                hit_face = if step_z > 0 { 5 } else { 2 };
+            }
+        }
     }
 }
 
