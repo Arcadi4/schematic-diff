@@ -71,42 +71,30 @@ fn load_bytes(bytes: &[u8], name: &str) -> Result<Loaded> {
         return Err(Error::message(format!("{name} is empty")));
     }
 
-    // A binary Java structure is the one format with no importer registered, so
-    // it is claimed by extension. Everything else is sniffed from the bytes,
-    // which is what lets a misnamed file still open.
-    if is_binary_structure(bytes) && !matches_sniffed_format(bytes) {
-        return load_structure_nbt(bytes, name);
-    }
-
     let manager = get_manager();
     let guard = manager
         .lock()
         .map_err(|_| Error::message("the format manager is poisoned".to_string()))?;
-    let (format, schematic) = guard
-        .read_bounded_with_format(bytes, &nucleation_limits())
-        .map_err(|error| Error::message(format!("{name} could not be read: {error}")))?;
-    drop(guard);
-
-    Ok(Loaded {
-        entities: schematic.get_entities_as_list().len(),
-        schematic,
-        format,
-    })
+    match guard.read_bounded_with_format(bytes, &nucleation_limits()) {
+        Ok((format, schematic)) => {
+            drop(guard);
+            Ok(Loaded {
+                entities: schematic.get_entities_as_list().len(),
+                schematic,
+                format,
+            })
+        }
+        Err(error) => {
+            drop(guard);
+            if is_binary_structure(bytes) {
+                load_structure_nbt(bytes, name)
+            } else {
+                Err(Error::message(format!("{name} could not be read: {error}")))
+            }
+        }
+    }
 }
 
-/// Does the registered importer set recognise these bytes?
-///
-/// Used to keep a `.nbt` that is really, say, a Bedrock structure from being
-/// hijacked by the binary-structure path.
-fn matches_sniffed_format(bytes: &[u8]) -> bool {
-    let manager = get_manager();
-    let Ok(guard) = manager.lock() else {
-        return false;
-    };
-    guard
-        .detect_format_bounded(bytes, &nucleation_limits())
-        .is_some_and(|format| format != "unknown")
-}
 
 /// Is this a gzipped binary NBT document with the vanilla structure layout?
 fn is_binary_structure(bytes: &[u8]) -> bool {
