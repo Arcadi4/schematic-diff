@@ -11,6 +11,7 @@ use nucleation::meshing::MeshOutput;
 
 use crate::mesh::{TintedMesh, draw as draw_mesh, draw_changes};
 use crate::render::{Bounds, Camera, Grid, render};
+use rayon::prelude::*;
 
 /// A packed `0xRRGGBB` as its three channels.
 pub fn rgb(color: u32) -> [u8; 3] {
@@ -241,20 +242,36 @@ pub fn compose(panels: &[Panel<'_>], camera: &Camera, layout: &Layout, theme: &T
     // uses the full width instead of leaving a seam at the right edge.
     let remainder = layout.width % count;
 
+    let panel_params: Vec<_> = panels
+        .iter()
+        .enumerate()
+        .map(|(index, panel)| {
+            let panel_width = base + u32::from((index as u32) < remainder);
+            let caption_scale = caption_scale(&panel.caption, panel_width, layout.cell_px.0);
+            let band = (font::HEIGHT * caption_scale + 2 * caption_scale) as i64;
+            let body_height = layout.height.saturating_sub(band as u32);
+            (panel, panel_width, caption_scale, band, body_height)
+        })
+        .collect();
+
+    let pictures: Vec<_> = panel_params
+        .par_iter()
+        .map(|(panel, panel_width, _, _, body_height)| match &panel.picture {
+            Picture::Flat(grid) => render(grid, layout.frame, camera, *panel_width, *body_height),
+            Picture::Mesh(mesh) => draw_mesh(mesh, layout.frame, camera, *panel_width, *body_height),
+            Picture::Changes(categories) => {
+                draw_changes(categories, layout.frame, camera, *panel_width, *body_height)
+            }
+        })
+        .collect();
+
     let mut x = 0u32;
-    for (index, panel) in panels.iter().enumerate() {
-        let panel_width = base + u32::from((index as u32) < remainder);
+    for (index, ((panel, panel_width, caption_scale, band, _), picture)) in
+        panel_params.iter().zip(pictures).enumerate()
+    {
         let panel_x = x;
         x += panel_width;
 
-        let caption_scale = caption_scale(&panel.caption, panel_width, layout.cell_px.0);
-        let band = (font::HEIGHT * caption_scale + 2 * caption_scale) as i64;
-
-        // Each segment advances by its full character count, so the trailing
-        // gap of one segment becomes the space before the next. The last legal
-        // pixel is one margin in from the panel's right edge: caption text that
-        // ran past it would collide with the next panel's caption, which shares
-        // the same band.
         let limit = i64::from(panel_x + panel_width - caption_scale);
         let mut cursor = i64::from(panel_x + caption_scale);
         for segment in &panel.caption {
@@ -262,38 +279,27 @@ pub fn compose(panels: &[Panel<'_>], camera: &Camera, layout: &Layout, theme: &T
             if room <= 0 {
                 break;
             }
-            let text = clip_to_width(&segment.text, room as u32, caption_scale);
+            let text = clip_to_width(&segment.text, room as u32, *caption_scale);
             font::draw(
                 &mut canvas,
                 cursor,
-                i64::from(caption_scale),
+                i64::from(*caption_scale),
                 &text,
-                caption_scale,
+                *caption_scale,
                 segment.color,
             );
             cursor += i64::from(font::ADVANCE * caption_scale) * text.chars().count() as i64;
         }
 
-        let body_height = layout.height.saturating_sub(band as u32);
-        let picture = match &panel.picture {
-            // The camera is framed to the layout's shared frame, not to the
-            // picture's own extent, so every panel of one composite shows the
-            // same build at the same scale.
-            Picture::Flat(grid) => render(grid, layout.frame, camera, panel_width, body_height),
-            Picture::Mesh(mesh) => draw_mesh(mesh, layout.frame, camera, panel_width, body_height),
-            Picture::Changes(categories) => {
-                draw_changes(categories, layout.frame, camera, panel_width, body_height)
-            }
-        };
-        canvas.blit(&picture, i64::from(panel_x), band);
+        canvas.blit(&picture, i64::from(panel_x), *band);
 
         if index + 1 < panels.len() {
-            canvas.fill_rect(i64::from(x) - 1, 0, 1, band as u32, [0, 0, 0, 0]);
+            canvas.fill_rect(i64::from(x) - 1, 0, 1, *band as u32, [0, 0, 0, 0]);
             canvas.fill_rect(
                 i64::from(x) - 1,
-                band,
+                *band,
                 1,
-                layout.height - band as u32,
+                layout.height - *band as u32,
                 [theme.divider[0], theme.divider[1], theme.divider[2], 255],
             );
         }
