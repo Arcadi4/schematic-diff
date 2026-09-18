@@ -19,14 +19,32 @@ use nucleation::{BlockState, UniversalSchematic};
 use crate::error::{Error, Result};
 use crate::raster::Canvas;
 
-/// Cells above this are refused rather than allocated.
-///
-/// This is a memory budget, not a correctness limit. A cell is four bytes, so
-/// the cap is 256 MiB. Nucleation's own decoder allows far more — its
-/// `DecodeLimits::max_volume` is 512 M cells — but that bounds what may be
-/// *parsed*, and a grid that large would cost gigabytes to allocate and minutes
-/// to raycast, in a terminal showing the result at roughly 1200x600.
-const MAX_CELLS: i64 = 64 * 1024 * 1024;
+/// The cell count a grid over `size` needs, refusing degenerate or
+/// unrepresentable extents.
+fn grid_cell_count(size: [i32; 3]) -> Result<i64> {
+    i64::from(size[0])
+        .checked_mul(i64::from(size[1]))
+        .and_then(|cells| cells.checked_mul(i64::from(size[2])))
+        .filter(|cells| *cells > 0)
+        .ok_or_else(|| {
+            Error::message(format!(
+                "the {}x{}x{} extent is too large to render",
+                size[0], size[1], size[2]
+            ))
+        })
+}
+
+fn alloc_cells(cells: i64, size: [i32; 3]) -> Result<Vec<u32>> {
+    let mut cells_vec = Vec::new();
+    cells_vec.try_reserve(cells as usize).map_err(|_| {
+        Error::message(format!(
+            "the {}x{}x{} extent ({} cells) is too large to render",
+            size[0], size[1], size[2], cells
+        ))
+    })?;
+    cells_vec.resize(cells as usize, 0);
+    Ok(cells_vec)
+}
 
 /// An axis-aligned inclusive voxel extent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,18 +171,11 @@ impl Grid {
         };
 
         let size = bounds.size();
-        let cells = i64::from(size[0]) * i64::from(size[1]) * i64::from(size[2]);
-        if cells > MAX_CELLS {
-            return Err(Error::message(format!(
-                "the build's {}x{}x{} extent ({} cells) is too large to render",
-                size[0], size[1], size[2], cells
-            )));
-        }
-
+        let cells = grid_cell_count(size)?;
         let mut grid = Self {
             min: bounds.min,
             dims: [size[0] as usize, size[1] as usize, size[2] as usize],
-            cells: vec![0; cells as usize],
+            cells: alloc_cells(cells, size)?,
         };
         for (position, block) in schematic.iter_blocks() {
             if is_air(block) {
@@ -192,17 +203,11 @@ impl Grid {
     /// a removal can sit outside the after build's own extent.
     pub fn empty_over(bounds: Bounds) -> Result<Self> {
         let size = bounds.size();
-        let cells = i64::from(size[0]) * i64::from(size[1]) * i64::from(size[2]);
-        if cells > MAX_CELLS || cells <= 0 {
-            return Err(Error::message(format!(
-                "the {}x{}x{} extent is too large to render",
-                size[0], size[1], size[2]
-            )));
-        }
+        let cells = grid_cell_count(size)?;
         Ok(Self {
             min: bounds.min,
             dims: [size[0] as usize, size[1] as usize, size[2] as usize],
-            cells: vec![0; cells as usize],
+            cells: alloc_cells(cells, size)?,
         })
     }
 
