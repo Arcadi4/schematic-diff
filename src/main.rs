@@ -37,6 +37,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use rayon::prelude::*;
 use bpaf::{Bpaf, Parser, construct, long};
 use nucleation::diff::{Diff, DiffSpec, diff};
 use nucleation::fingerprint::FingerprintSpec;
@@ -243,30 +244,37 @@ fn run() -> Result<()> {
         return Ok(());
     };
 
-    let before = load_side(invocation.before.as_deref())?;
-    let after = load_side(invocation.after.as_deref())?;
+    let ((before, after), pack) = rayon::join(
+        || {
+            rayon::join(
+                || load_side(invocation.before.as_deref()),
+                || load_side(invocation.after.as_deref()),
+            )
+        },
+        || {
+            match &invocation.pack {
+                Some(path) => match Pack::open(path) {
+                    Ok(pack) => Some(pack),
+                    Err(error) => {
+                        report(format_args!(
+                            "--pack {} could not be used ({error}); using the built-in colours",
+                            path.display()
+                        ));
+                        None
+                    }
+                },
+                None => None,
+            }
+        },
+    );
+    let before = before?;
+    let after = after?;
     if before.is_none() && after.is_none() {
         return Err(Error::message(format!(
             "both sides of {} are missing",
             invocation.display_path
         )));
     }
-
-    // A pack that will not load is a warning, not a failure: the diff is still
-    // worth showing in the built-in colours.
-    let pack = match &invocation.pack {
-        Some(path) => match Pack::open(path) {
-            Ok(pack) => Some(pack),
-            Err(error) => {
-                report(format_args!(
-                    "--pack {} could not be used ({error}); using the built-in colours",
-                    path.display()
-                ));
-                None
-            }
-        },
-        None => None,
-    };
 
     let changes = match (&before, &after) {
         (Some(before), Some(after)) => Some(diff(
@@ -363,20 +371,25 @@ fn render_scene(
     // With a pack the build is meshed — real geometry, real textures; without
     // one it is a grid of coloured cubes. Two paths, but they share a camera
     // and a framing, so swapping between them is not a change of viewpoint.
-    let before_mesh = match (pack, before) {
-        (Some(pack), Some(loaded)) => Some(pack.mesh(&loaded.schematic)?),
-        _ => None,
-    };
-    let after_mesh = match (pack, after) {
-        (Some(pack), Some(loaded)) => Some(pack.mesh(&loaded.schematic)?),
-        _ => None,
-    };
+    let (before_mesh, after_mesh) = rayon::join(
+        || match (pack, before) {
+            (Some(pack), Some(loaded)) => pack.mesh(&loaded.schematic).map(Some),
+            _ => Ok(None),
+        },
+        || match (pack, after) {
+            (Some(pack), Some(loaded)) => pack.mesh(&loaded.schematic).map(Some),
+            _ => Ok(None),
+        },
+    );
+    let before_mesh = before_mesh?;
+    let after_mesh = after_mesh?;
     let meshed = before_mesh.is_some() || after_mesh.is_some();
 
     let (before_grid, after_grid) = if meshed {
         (None, None)
     } else {
-        (grid_of(before)?, grid_of(after)?)
+        let (bg, ag) = rayon::join(|| grid_of(before), || grid_of(after));
+        (bg?, ag?)
     };
 
     // One frame for every panel: framing each side to its own extent would
@@ -403,7 +416,7 @@ fn render_scene(
         .transpose()?;
     let meshed_changes = match pack {
         Some(pack) => categories
-            .iter()
+            .par_iter()
             .map(|category| {
                 Ok(TintedMesh {
                     mesh: pack.mesh(&subset(&category.cells))?,
