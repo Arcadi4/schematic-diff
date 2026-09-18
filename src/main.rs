@@ -41,7 +41,7 @@ use rayon::prelude::*;
 use bpaf::{Bpaf, Parser, construct, long};
 use nucleation::diff::{Diff, DiffSpec, diff};
 use nucleation::fingerprint::FingerprintSpec;
-use nucleation::{BlockState, UniversalSchematic};
+use nucleation::{BlockState, Region, UniversalSchematic};
 
 use crate::error::{Error, Result};
 use crate::format::Loaded;
@@ -844,27 +844,40 @@ fn format_stat(
                 return lines;
             };
 
-            let mut added_counts: HashMap<&str, usize> = HashMap::new();
-            for (_, block) in &changes.added {
-                *added_counts.entry(block.get_name()).or_default() += 1;
-            }
-
-            let mut removed_counts: HashMap<&str, usize> = HashMap::new();
-            for (_, block) in &changes.removed {
-                *removed_counts.entry(block.get_name()).or_default() += 1;
-            }
-
-            let mut changed_counts: HashMap<(&str, Option<&str>), usize> = HashMap::new();
-            for (_, was, now) in changes.changed.iter().chain(changes.swapped.iter()) {
-                let was_name = was.get_name();
-                let now_name = now.get_name();
-                let key = if was_name == now_name {
-                    (was_name, None)
-                } else {
-                    (was_name, Some(now_name))
-                };
-                *changed_counts.entry(key).or_default() += 1;
-            }
+            let (added_counts, (removed_counts, changed_counts)) = rayon::join(
+                || {
+                    let mut counts: HashMap<&str, usize> = HashMap::new();
+                    for (_, block) in &changes.added {
+                        *counts.entry(block.get_name()).or_default() += 1;
+                    }
+                    counts
+                },
+                || {
+                    rayon::join(
+                        || {
+                            let mut counts: HashMap<&str, usize> = HashMap::new();
+                            for (_, block) in &changes.removed {
+                                *counts.entry(block.get_name()).or_default() += 1;
+                            }
+                            counts
+                        },
+                        || {
+                            let mut counts: HashMap<(&str, Option<&str>), usize> = HashMap::new();
+                            for (_, was, now) in changes.changed.iter().chain(changes.swapped.iter()) {
+                                let was_name = was.get_name();
+                                let now_name = now.get_name();
+                                let key = if was_name == now_name {
+                                    (was_name, None)
+                                } else {
+                                    (was_name, Some(now_name))
+                                };
+                                *counts.entry(key).or_default() += 1;
+                            }
+                            counts
+                        },
+                    )
+                },
+            );
 
             enum StatEntry<'a> {
                 Added { count: usize, name: &'a str },
@@ -973,10 +986,60 @@ fn format_stat(
 }
 
 fn format_palette_stat(lines: &mut Vec<String>, loaded: &Loaded, prefix: &str, mode: StatMode) {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for (_, block) in loaded.schematic.iter_blocks() {
-        if !render::is_air(block) {
-            *counts.entry(block.get_name()).or_default() += 1;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let regions: Vec<&Region> = std::iter::once(&loaded.schematic.default_region)
+        .chain(loaded.schematic.other_regions.values())
+        .collect();
+
+    let region_counts: Vec<HashMap<String, usize>> = regions
+        .par_iter()
+        .map(|region| {
+            let palette = region.get_palette();
+            let names: Vec<(&str, bool)> = palette
+                .iter()
+                .map(|b| (b.get_name(), render::is_air(b)))
+                .collect();
+
+            let chunk_counts = region
+                .blocks
+                .par_chunks(65536)
+                .fold(
+                    || vec![0usize; palette.len()],
+                    |mut acc, chunk| {
+                        for &idx in chunk {
+                            if idx < acc.len() {
+                                acc[idx] += 1;
+                            }
+                        }
+                        acc
+                    },
+                )
+                .reduce(
+                    || vec![0usize; palette.len()],
+                    |mut a, b| {
+                        for (acc, count) in a.iter_mut().zip(b) {
+                            *acc += count;
+                        }
+                        a
+                    },
+                );
+
+            let mut local_map: HashMap<String, usize> = HashMap::new();
+            for (idx, &count) in chunk_counts.iter().enumerate() {
+                if idx < names.len() {
+                    let (name, is_air) = names[idx];
+                    if !is_air && count > 0 {
+                        *local_map.entry(name.to_string()).or_default() += count;
+                    }
+                }
+            }
+            local_map
+        })
+        .collect();
+
+    for r_map in region_counts {
+        for (name, count) in r_map {
+            *counts.entry(name).or_default() += count;
         }
     }
 
@@ -986,7 +1049,7 @@ fn format_palette_stat(lines: &mut Vec<String>, loaded: &Loaded, prefix: &str, m
         return;
     }
 
-    let mut items: Vec<(&str, usize)> = counts.into_iter().collect();
+    let mut items: Vec<(String, usize)> = counts.into_iter().collect();
     items.sort_unstable_by(|(name_a, count_a), (name_b, count_b)| {
         count_b.cmp(count_a).then_with(|| name_a.cmp(name_b))
     });
@@ -1020,16 +1083,57 @@ fn format_palette_stat(lines: &mut Vec<String>, loaded: &Loaded, prefix: &str, m
         lines.push(format!("    ... and {remaining} more block types"));
     }
 }
+fn count_non_air_blocks_parallel(schematic: &UniversalSchematic) -> usize {
+    let regions: Vec<&Region> = std::iter::once(&schematic.default_region)
+        .chain(schematic.other_regions.values())
+        .collect();
+
+    regions
+        .par_iter()
+        .map(|region| {
+            let palette = region.get_palette();
+            let is_air_flags: Vec<bool> = palette.iter().map(render::is_air).collect();
+
+            let chunk_counts = region
+                .blocks
+                .par_chunks(65536)
+                .fold(
+                    || vec![0usize; palette.len()],
+                    |mut acc, chunk| {
+                        for &idx in chunk {
+                            if idx < acc.len() {
+                                acc[idx] += 1;
+                            }
+                        }
+                        acc
+                    },
+                )
+                .reduce(
+                    || vec![0usize; palette.len()],
+                    |mut a, b| {
+                        for (acc, count) in a.iter_mut().zip(b) {
+                            *acc += count;
+                        }
+                        a
+                    },
+                );
+
+            chunk_counts
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| !is_air_flags.get(*idx).copied().unwrap_or(true))
+                .map(|(_, count)| count)
+                .sum::<usize>()
+        })
+        .sum()
+}
 
 /// One side's size, block count and provenance, for the summary.
 fn describe(loaded: &Loaded) -> String {
     let schematic = &loaded.schematic;
     let (x, y, z) = schematic.get_tight_dimensions();
     let regions = schematic.get_region_names().len();
-    let blocks = schematic
-        .iter_blocks()
-        .filter(|(_, block)| !render::is_air(block))
-        .count();
+    let blocks = count_non_air_blocks_parallel(schematic);
     format!(
         "{x}x{y}x{z}  {blocks} blocks  {regions} region{}{}  [{}]",
         if regions == 1 { "" } else { "s" },
