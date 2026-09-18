@@ -18,6 +18,7 @@ use flate2::read::GzDecoder;
 use nucleation::UniversalSchematic;
 use nucleation::block_entity::BlockEntity;
 use nucleation::block_position::BlockPosition;
+use nucleation::formats::limits::DecodeLimits;
 use nucleation::formats::manager::get_manager;
 use nucleation::nbt::NbtMap;
 use nucleation::{BlockState, Entity, Region};
@@ -32,6 +33,17 @@ use crate::error::{Error, Result};
 const MAX_VOLUME: i64 = 512 * 1024 * 1024;
 /// Upper bound on `.nbt` size after decompression.
 const MAX_DECOMPRESSED: u32 = 1024 * 1024 * 1024;
+/// Byte budget handed to Nucleation's decoders, in place of their 256 MiB
+/// default.
+const MAX_NUCLEATION_INPUT: usize = 1024 * 1024 * 1024;
+
+/// The decode limits every Nucleation import runs under.
+fn nucleation_limits() -> DecodeLimits {
+    DecodeLimits {
+        max_input_bytes: MAX_NUCLEATION_INPUT,
+        ..DecodeLimits::default()
+    }
+}
 
 /// A loaded schematic plus the provenance the summary reports.
 pub struct Loaded {
@@ -70,11 +82,8 @@ fn load_bytes(bytes: &[u8], name: &str) -> Result<Loaded> {
     let guard = manager
         .lock()
         .map_err(|_| Error::message("the format manager is poisoned".to_string()))?;
-    let format = guard
-        .detect_format(bytes)
-        .unwrap_or_else(|| "unknown".into());
-    let schematic = guard
-        .read(bytes)
+    let (format, schematic) = guard
+        .read_bounded_with_format(bytes, &nucleation_limits())
         .map_err(|error| Error::message(format!("{name} could not be read: {error}")))?;
     drop(guard);
 
@@ -95,7 +104,7 @@ fn matches_sniffed_format(bytes: &[u8]) -> bool {
         return false;
     };
     guard
-        .detect_format(bytes)
+        .detect_format_bounded(bytes, &nucleation_limits())
         .is_some_and(|format| format != "unknown")
 }
 
