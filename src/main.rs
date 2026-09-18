@@ -289,19 +289,23 @@ fn run() -> Result<()> {
         None => Vec::new(),
     };
 
-    let rendered = match render_scene(
-        &invocation,
-        &before,
-        &after,
-        pack.as_ref(),
-        &categories,
-        &output,
-        stat.len(),
-    ) {
-        Ok(rendered) => Some(rendered),
-        Err(error) => {
-            report(format_args!("{error}"));
-            None
+    let rendered = if invocation.kitty == Some(false) {
+        None
+    } else {
+        match render_scene(
+            &invocation,
+            &before,
+            &after,
+            pack.as_ref(),
+            &categories,
+            &output,
+            stat.len(),
+        ) {
+            Ok(rendered) => Some(rendered),
+            Err(error) => {
+                report(format_args!("{error}"));
+                None
+            }
         }
     };
 
