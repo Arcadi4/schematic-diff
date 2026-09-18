@@ -19,6 +19,15 @@ use nucleation::{BlockState, UniversalSchematic};
 use crate::error::{Error, Result};
 use crate::raster::Canvas;
 
+/// Cells above this are refused rather than allocated.
+///
+/// This is a memory budget, not a correctness limit. A cell is four bytes, so
+/// the cap is 256 MiB. Nucleation's own decoder allows far more — its
+/// `DecodeLimits::max_volume` is 512 M cells — but that bounds what may be
+/// *parsed*, and a grid that large would cost gigabytes to allocate and minutes
+/// to raycast, in a terminal showing the result at roughly 1200x600.
+pub const MAX_CELLS: i64 = 64 * 1024 * 1024;
+
 /// The cell count a grid over `size` needs, refusing degenerate or
 /// unrepresentable extents.
 fn grid_cell_count(size: [i32; 3]) -> Result<i64> {
@@ -92,10 +101,20 @@ impl Bounds {
     }
 
     pub fn size(self) -> [i32; 3] {
+        let axis_size = |min: i32, max: i32| -> i32 {
+            let diff = i64::from(max) - i64::from(min) + 1;
+            if diff <= 0 {
+                0
+            } else if diff > i64::from(i32::MAX) {
+                i32::MAX
+            } else {
+                diff as i32
+            }
+        };
         [
-            self.max[0] - self.min[0] + 1,
-            self.max[1] - self.min[1] + 1,
-            self.max[2] - self.min[2] + 1,
+            axis_size(self.min[0], self.max[0]),
+            axis_size(self.min[1], self.max[1]),
+            axis_size(self.min[2], self.max[2]),
         ]
     }
 }
@@ -140,6 +159,7 @@ pub struct Eye {
 /// palette produces is zero — the fallback hash is deliberately held away from
 /// black — so the sentinel is unambiguous, and without a pack a block is a cube
 /// of one colour, so a colour is all a cell needs.
+#[derive(Debug)]
 pub struct Grid {
     pub min: [i32; 3],
     pub dims: [usize; 3],
@@ -172,6 +192,12 @@ impl Grid {
 
         let size = bounds.size();
         let cells = grid_cell_count(size)?;
+        if cells > MAX_CELLS {
+            return Err(Error::message(format!(
+                "the build's {}x{}x{} extent ({} cells) is too large to render",
+                size[0], size[1], size[2], cells
+            )));
+        }
         let mut grid = Self {
             min: bounds.min,
             dims: [size[0] as usize, size[1] as usize, size[2] as usize],
@@ -204,6 +230,12 @@ impl Grid {
     pub fn empty_over(bounds: Bounds) -> Result<Self> {
         let size = bounds.size();
         let cells = grid_cell_count(size)?;
+        if cells > MAX_CELLS {
+            return Err(Error::message(format!(
+                "the {}x{}x{} extent is too large to render",
+                size[0], size[1], size[2]
+            )));
+        }
         Ok(Self {
             min: bounds.min,
             dims: [size[0] as usize, size[1] as usize, size[2] as usize],

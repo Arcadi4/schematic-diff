@@ -268,14 +268,102 @@ fn run() -> Result<()> {
         None => None,
     };
 
+    let changes = match (&before, &after) {
+        (Some(before), Some(after)) => Some(diff(
+            &before.schematic,
+            &after.schematic,
+            &DiffSpec::from_preset(FingerprintSpec::exact()),
+        )),
+        _ => None,
+    };
+    let categories = change_categories(changes.as_ref());
+
+    let mut output = Output::detect();
+    let draw_image = output.is_terminal() && kitty::supported(invocation.kitty);
+
+    // The image occupies everything above the text, so that is the area it is
+    // laid out for. One spare row keeps the last text line from scrolling the
+    // image, since a placed image scrolls with the text it sits over.
+    let stat = match invocation.stat {
+        Some(mode) => format_stat(&before, &after, changes.as_ref(), invocation.standalone, mode),
+        None => Vec::new(),
+    };
+
+    let rendered = match render_scene(
+        &invocation,
+        &before,
+        &after,
+        pack.as_ref(),
+        &categories,
+        &output,
+        stat.len(),
+    ) {
+        Ok(rendered) => Some(rendered),
+        Err(error) => {
+            report(format_args!("{error}"));
+            None
+        }
+    };
+
+    if let Some(rendered) = &rendered
+        && let Some(path) = &invocation.output
+    {
+        std::fs::write(path, &rendered.png)?;
+    }
+
+    // The heading names the file the picture belongs to, so it goes above it.
+    write_heading(&mut output, &invocation, &before, &after)?;
+
+    if let Some(rendered) = &rendered
+        && draw_image
+    {
+        let columns = output.screen.columns;
+        // The image is placed over `image_cells` rows without moving the
+        // cursor, so the text below starts after those rows.
+        kitty::write_png(&mut output, &rendered.png, columns, rendered.image_cells)?;
+        output.write_all(b"\n".repeat(rendered.image_cells as usize).as_slice())?;
+    }
+
+    write_details(
+        &mut output,
+        &invocation,
+        &before,
+        &after,
+        &changes,
+        pack.as_ref(),
+        &stat,
+    )?;
+    output.flush()?;
+
+    if rendered.is_some() && !draw_image {
+        report_once(format_args!("{}", no_image_reason(&invocation, &output)));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct Rendered {
+    png: Vec<u8>,
+    image_cells: u32,
+}
+
+fn render_scene(
+    invocation: &Invocation,
+    before: &Option<Loaded>,
+    after: &Option<Loaded>,
+    pack: Option<&Pack>,
+    categories: &[Category<'_>],
+    output: &Output,
+    stat_len: usize,
+) -> Result<Rendered> {
     // With a pack the build is meshed — real geometry, real textures; without
     // one it is a grid of coloured cubes. Two paths, but they share a camera
     // and a framing, so swapping between them is not a change of viewpoint.
-    let before_mesh = match (&pack, &before) {
+    let before_mesh = match (pack, before) {
         (Some(pack), Some(loaded)) => Some(pack.mesh(&loaded.schematic)?),
         _ => None,
     };
-    let after_mesh = match (&pack, &after) {
+    let after_mesh = match (pack, after) {
         (Some(pack), Some(loaded)) => Some(pack.mesh(&loaded.schematic)?),
         _ => None,
     };
@@ -284,7 +372,7 @@ fn run() -> Result<()> {
     let (before_grid, after_grid) = if meshed {
         (None, None)
     } else {
-        (grid_of(&before)?, grid_of(&after)?)
+        (grid_of(before)?, grid_of(after)?)
     };
 
     // One frame for every panel: framing each side to its own extent would
@@ -304,22 +392,12 @@ fn run() -> Result<()> {
     }
     .unwrap_or_default();
 
-    let changes = match (&before, &after) {
-        (Some(before), Some(after)) => Some(diff(
-            &before.schematic,
-            &after.schematic,
-            &DiffSpec::from_preset(FingerprintSpec::exact()),
-        )),
-        _ => None,
-    };
-    let categories = change_categories(changes.as_ref());
-
     // The changes panel, in the form this run's renderer draws it: a grid of
     // coloured blocks without a pack, one mesh per category with one.
     let flat_changes = (pack.is_none() && !categories.is_empty())
-        .then(|| changes_grid(frame, &categories))
+        .then(|| changes_grid(frame, categories))
         .transpose()?;
-    let meshed_changes = match &pack {
+    let meshed_changes = match pack {
         Some(pack) => categories
             .iter()
             .map(|category| {
@@ -332,22 +410,11 @@ fn run() -> Result<()> {
         None => Vec::new(),
     };
 
-    let mut output = Output::detect();
-    let draw_image = output.is_terminal() && kitty::supported(invocation.kitty);
-
-    // The image occupies everything above the text, so that is the area it is
-    // laid out for. One spare row keeps the last text line from scrolling the
-    // image, since a placed image scrolls with the text it sits over.
-    let stat = match invocation.stat {
-        Some(mode) => format_stat(&before, &after, changes.as_ref(), invocation.standalone, mode),
-        None => Vec::new(),
-    };
-
     let text_lines = summary_lines(
-        &before,
-        &after,
+        before,
+        after,
         pack.is_some(),
-        stat.len() as u32,
+        stat_len as u32,
         invocation.standalone,
     );
     let fit_height = output.screen.rows.saturating_sub(text_lines + 1);
@@ -358,7 +425,6 @@ fn run() -> Result<()> {
         default_height
     };
     let (width, height) = output.image_pixels(image_cells);
-    let columns = output.screen.columns;
 
     // One `--pack` decides the renderer for the whole run, and a side that does
     // not exist simply has no mesh — so the choice keys off whether the run is
@@ -377,7 +443,7 @@ fn run() -> Result<()> {
         }
     };
     let image = compose_image(
-        &invocation,
+        invocation,
         &scene,
         Layout {
             width,
@@ -388,35 +454,7 @@ fn run() -> Result<()> {
     );
 
     let png = raster::encode_png(&image)?;
-    if let Some(path) = &invocation.output {
-        std::fs::write(path, &png)?;
-    }
-
-    // The heading names the file the picture belongs to, so it goes above it.
-    write_heading(&mut output, &invocation, &before, &after)?;
-
-    if draw_image {
-        // The image is placed over `image_cells` rows without moving the
-        // cursor, so the text below starts after those rows.
-        kitty::write_png(&mut output, &png, columns, image_cells)?;
-        output.write_all(b"\n".repeat(image_cells as usize).as_slice())?;
-    }
-
-    write_details(
-        &mut output,
-        &invocation,
-        &before,
-        &after,
-        &changes,
-        pack.as_ref(),
-        &stat,
-    )?;
-    output.flush()?;
-
-    if !draw_image {
-        report_once(format_args!("{}", no_image_reason(&invocation, &output)));
-    }
-    Ok(())
+    Ok(Rendered { png, image_cells })
 }
 
 /// Report a problem with this run's own arguments.
