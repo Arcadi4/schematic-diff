@@ -1,16 +1,10 @@
-//! The one error type this tool reports.
-
 use std::fmt;
 
-/// Every way a run can fail.
-///
-/// The variants exist only to be printed: each carries text already written
-/// for a person, so nothing downstream matches on which one it is.
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
     Message(String),
-    /// `--help`/`--version`: print the held output to stdout, exit 0.
+    /// Parser-generated help or completion output; print to stdout and exit successfully.
     HelpExit(bpaf::ParseFailure),
 }
 
@@ -25,8 +19,6 @@ impl fmt::Display for Error {
         match self {
             Self::Io(error) => write!(f, "{error}"),
             Self::Message(text) => f.write_str(text),
-            // Never printed with the `schematic-diff: ` prefix: `main` prints
-            // the held output to stdout and exits 0 instead.
             Self::HelpExit(_) => Ok(()),
         }
     }
@@ -53,9 +45,6 @@ impl From<bpaf::ParseFailure> for Error {
     fn from(failure: bpaf::ParseFailure) -> Self {
         use bpaf::ParseFailure as Failure;
         match failure {
-            // `--help`/`--version` print to stdout, exit 0; `run_inner` keeps
-            // them inside `Result` instead of exiting, so carry the output up
-            // for `main` to print rather than failing here.
             Failure::Stdout(..) | Failure::Completion(_) => Self::HelpExit(failure),
             Failure::Stderr(_) => Self::message(failure.unwrap_stderr()),
         }

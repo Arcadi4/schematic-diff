@@ -1,32 +1,17 @@
-//! Where a run's output goes, and the terminal geometry the image is sized for.
+//! Terminal output routing and geometry.
 //!
-//! Git hands an external diff a stream whose kind depends on how it was
-//! invoked, and only one of those kinds can show an image:
-//!
-//! | invocation             | stdout | an image can be drawn  |
-//! |------------------------|--------|------------------------|
-//! | `git diff`             | a tty  | yes, right where it is |
-//! | `git diff \| less`     | a pipe | not into the pipe      |
-//! | `git diff > patch.txt` | a file | no                     |
-//!
-//! A pipe means something else is reading the output — git's pager, or another
-//! program — and pixels written into it are lost or corrupt the reader. A
-//! regular file is a deliberate redirect, so escapes must never be written to
-//! it. In both cases the terminal the user is sitting at is still reachable
-//! through `/dev/tty`, which is where a pipe-directed run sends its image.
+//! Git can send an external diff's stdout to a terminal, pipe, or regular file.
+//! Image escapes are safe only on a terminal. For pipes, [`Output::detect`] tries
+//! `/dev/tty`; for regular files it leaves stdout untouched.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::{AsRawFd, RawFd};
 
-/// Cell size assumed when the terminal does not report its pixel dimensions.
-///
-/// The usual cell is about twice as tall as it is wide, which is the ratio
-/// that keeps a build from being stretched when the image is scaled into its
-/// cell box. The absolute values only set how much detail is available.
+/// Fallback cell dimensions in pixels when `TIOCGWINSZ` reports zeroes. The 1:2
+/// ratio preserves terminal text proportions.
 const ASSUMED_CELL: (u32, u32) = (12, 24);
 
-/// Terminal size in cells, plus the pixel size of one cell.
 #[derive(Clone, Copy, Debug)]
 pub struct Screen {
     pub columns: u32,
@@ -35,13 +20,8 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// Read the geometry of the terminal behind `fd`.
-    ///
-    /// The pixel dimensions come from the same `TIOCGWINSZ` the cell counts do,
-    /// so the image is sized from what the terminal actually reports rather
-    /// than from an assumed aspect ratio. Terminals that leave the pixel fields
-    /// zero fall back to [`ASSUMED_CELL`], which costs nothing but the exact
-    /// aspect ratio.
+    /// Read cell counts and pixel dimensions from `fd`. Zero pixel dimensions
+    /// fall back to [`ASSUMED_CELL`].
     pub fn measure(fd: RawFd) -> Self {
         let Some(size) = winsize(fd) else {
             return Self::fallback();
@@ -66,7 +46,6 @@ impl Screen {
         }
     }
 
-    /// A usable size for a run with no terminal anywhere.
     pub fn fallback() -> Self {
         Self {
             columns: 100,
@@ -76,7 +55,6 @@ impl Screen {
     }
 }
 
-/// One `TIOCGWINSZ` on `fd`.
 fn winsize(fd: RawFd) -> Option<libc::winsize> {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: `size` is a live `winsize` and `fd` is an open descriptor; the
@@ -85,11 +63,7 @@ fn winsize(fd: RawFd) -> Option<libc::winsize> {
     (result == 0).then_some(size)
 }
 
-/// True when `fd` is a pipe or a socket rather than a file or a terminal.
-///
-/// This is the difference between output being read as it is produced — by a
-/// pager or another program — and being collected into a file.
-fn is_stream(fd: RawFd) -> bool {
+fn is_pipe_or_socket(fd: RawFd) -> bool {
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: `stat` is a live `stat` and `fd` is an open descriptor.
     if unsafe { libc::fstat(fd, &mut stat) } != 0 {
@@ -99,16 +73,13 @@ fn is_stream(fd: RawFd) -> bool {
     kind == libc::S_IFIFO || kind == libc::S_IFSOCK
 }
 
-/// The stream a run writes to.
 pub struct Output {
     stream: Box<dyn Write>,
-    /// Whether `stream` is a terminal, and so can show an image.
     terminal: bool,
     pub screen: Screen,
 }
 
 impl Output {
-    /// Choose the stream for this run.
     pub fn detect() -> Self {
         let stdout = io::stdout();
         if stdout.is_terminal() {
@@ -119,12 +90,9 @@ impl Output {
             };
         }
 
-        // stdout goes somewhere else. Divert to the terminal only when
-        // something is *reading* that somewhere — a pager or another program,
-        // which will not see the image either way — so the picture still
-        // reaches the user. A regular file is a redirect the user asked for,
-        // and rewriting it to the terminal would silently empty their file.
-        if is_stream(stdout.as_raw_fd())
+        // A pipe's reader cannot render the image, so use `/dev/tty`. A file is
+        // an explicit redirect and must stay untouched.
+        if is_pipe_or_socket(stdout.as_raw_fd())
             && let Ok(tty) = File::options().write(true).open("/dev/tty")
             && tty.is_terminal()
         {
@@ -142,7 +110,6 @@ impl Output {
         }
     }
 
-    /// Whether image escapes can be written to this stream.
     pub fn is_terminal(&self) -> bool {
         self.terminal
     }

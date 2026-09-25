@@ -1,11 +1,7 @@
-//! Drawing a mesh: projection, a depth-buffered target, and triangle fill.
+//! Depth-buffered software rasterizer for resource-pack meshes.
 //!
-//! With `--pack` the build arrives as triangles — positions, UVs, and per-vertex
-//! colours that already carry the game's tint, ambient occlusion and lighting —
-//! so drawing it is an ordinary z-buffered rasterization. That is deliberately
-//! dull code: the interesting decisions (which model a block draws, how its
-//! faces are oriented, what tint applies) are made by the mesher, and this only
-//! has to put the triangles on screen.
+//! `schematic_mesher` supplies geometry, UVs, and per-vertex shading; this
+//! module projects and fills those triangles.
 
 use nucleation::meshing::{MeshLayer, MeshOutput};
 use schematic_mesher::TextureAtlas;
@@ -13,20 +9,7 @@ use schematic_mesher::TextureAtlas;
 use crate::raster::{Canvas, rgb, tint};
 use crate::render::{Bounds, Camera, Eye};
 
-/// How a layer's triangles are drawn.
-///
-/// The three parts are what the pixel loop needs beyond the geometry itself:
-/// where to sample colour from, what to lay over it, and whether to blend with
-/// what is already there.
-struct Paint<'a> {
-    atlas: &'a TextureAtlas,
-    /// A colour filtered over every texel drawn, for the changes panel.
-    filter: Option<[u8; 3]>,
-    /// Whether these triangles blend with what is already drawn.
-    blend: bool,
-}
-
-/// A point on a triangle, after projection.
+/// A projected triangle vertex with view-space depth.
 #[derive(Clone, Copy)]
 struct Screen {
     x: f32,
@@ -35,11 +18,12 @@ struct Screen {
     z: f32,
 }
 
-/// The camera, resolved into the form a rasterizer needs.
-///
-/// Both this and the block-grid raycaster derive from [`Camera`], so the two
-/// renderers frame a build identically and swapping between them is not a
-/// change of viewpoint.
+struct Paint<'a> {
+    atlas: &'a TextureAtlas,
+    filter: Option<[u8; 3]>,
+    blend: bool,
+}
+
 struct View {
     eye: Eye,
     /// Pixels per unit at unit depth.
@@ -50,8 +34,7 @@ struct View {
 
 impl View {
     fn new(eye: Eye, width: u32, height: u32) -> Self {
-        // A 50-degree vertical field of view, the same the raycaster uses.
-        let tan_half = (50.0f32.to_radians() / 2.0).tan();
+        let tan_half = (Camera::VERTICAL_FOV_DEG.to_radians() / 2.0).tan();
         Self {
             eye,
             focal: (height as f32 / 2.0) / tan_half,
@@ -60,7 +43,6 @@ impl View {
         }
     }
 
-    /// Project a world point, or `None` when it is behind the camera.
     fn project(&self, point: [f32; 3]) -> Option<Screen> {
         let rel = [
             point[0] - self.eye.position[0],
@@ -82,7 +64,7 @@ impl View {
         })
     }
 
-    /// Depth fog, matching the block-grid raycaster so the two agree.
+    /// Linear depth fog matching the voxel raycaster.
     fn fog(&self, z: f32) -> f32 {
         let falloff = 1.0
             - 0.25
@@ -96,7 +78,6 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// An image being drawn into, with a depth buffer.
 struct Target {
     width: u32,
     height: u32,
@@ -110,7 +91,6 @@ impl Target {
             width,
             height,
             color: vec![[0, 0, 0, 0]; (width as usize) * (height as usize)],
-            // Farther than anything can be, so the first write always wins.
             depth: vec![f32::INFINITY; (width as usize) * (height as usize)],
         }
     }
@@ -119,10 +99,6 @@ impl Target {
         (y as usize) * (self.width as usize) + x as usize
     }
 
-    /// Draw one triangle, sampling `paint.atlas` through its UVs.
-    ///
-    /// `colors` are the mesher's per-vertex tints, already carrying the game's
-    /// own shading, so they are interpolated and applied rather than replaced.
     fn triangle(
         &mut self,
         view: &View,
@@ -141,10 +117,8 @@ impl Target {
             return;
         };
 
-        // The signed area tells us the winding; either winding draws, so the
-        // edge functions are normalised rather than back-face culling. A build
-        // is closed geometry and culling saves little, while getting the
-        // winding wrong would punch holes in it.
+        // Draw either winding. Back-face culling saves little for closed block
+        // geometry and can punch holes when winding is inconsistent.
         let area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
         if area.abs() < 1e-6 {
             return;
@@ -159,9 +133,8 @@ impl Target {
             return;
         }
 
-        // Depth is interpolated on `1/z`, which is what makes it linear in
-        // screen space. Interpolating `z` directly would let a texture swim
-        // across a triangle that is strongly foreshortened.
+        // Reciprocal depth is linear in screen space; direct `z` interpolation
+        // would swim textures across foreshortened triangles.
         let inv_z = [1.0 / a.z, 1.0 / b.z, 1.0 / c.z];
 
         for y in min_y..=max_y {
@@ -197,9 +170,8 @@ impl Target {
                     + w2 * uvs[2][1] * inv_z[2])
                     * depth;
                 let texel = sample_atlas(paint.atlas, u, v);
-                // In a mixed layer a see-through texel lets whatever is behind
-                // show through; in an alpha-tested one it is either drawn or
-                // discarded outright.
+                // Alpha-tested layers discard texels below half opacity; blended
+                // layers preserve partial transparency.
                 if !paint.blend && texel[3] < 128 {
                     continue;
                 }
@@ -214,16 +186,12 @@ impl Target {
                 let vertex_alpha =
                     w0 * colors[0][3] + w1 * colors[1][3] + w2 * colors[2][3];
                 let alpha = (f32::from(texel[3]) / 255.0 * vertex_alpha).clamp(0.0, 1.0);
-                // The mesher's per-vertex colour carries tint, ambient occlusion
-                // and lighting; it modulates the texel rather than replacing it.
                 let shade = [
                     w0 * colors[0][0] + w1 * colors[1][0] + w2 * colors[2][0],
                     w0 * colors[0][1] + w1 * colors[1][1] + w2 * colors[2][1],
                     w0 * colors[0][2] + w1 * colors[1][2] + w2 * colors[2][2],
                 ];
                 let fog = view.fog(depth);
-                // The transparent layer blends, so it must not occlude what is
-                // already drawn at this pixel.
                 if !paint.blend {
                     self.depth[index] = depth;
                 }
@@ -246,7 +214,6 @@ impl Target {
         }
     }
 
-    /// Draw one mesh layer.
     fn layer(&mut self, view: &View, layer: &MeshLayer, paint: &Paint<'_>) {
         for triangle in layer.indices.as_chunks::<3>().0 {
             let [i0, i1, i2] = [
@@ -278,7 +245,6 @@ impl Target {
         }
     }
 
-    /// Copy into a canvas, leaving untouched pixels transparent.
     fn into_canvas(self) -> Canvas {
         let mut canvas = Canvas::new(self.width, self.height);
         for (index, texel) in self.color.iter().enumerate() {
@@ -295,14 +261,10 @@ impl Target {
     }
 }
 
-/// One channel of a blend: `over` laid over `base` at `alpha`.
 fn mix(base: u8, over: u8, alpha: f32) -> u8 {
     clamp_byte(f32::from(base) * (1.0 - alpha) + f32::from(over) * alpha)
 }
 
-/// The colour a texel ends up as: shaded, set back by fog, and — where the
-/// changes panel asks for it — filtered towards the colour of the category the
-/// block belongs to.
 fn lit_texel(texel: &[u8; 4], shade: [f32; 3], fog: f32, filter: Option<[u8; 3]>) -> [u8; 3] {
     let shaded = [
         clamp_byte(f32::from(texel[0]) * shade[0] * fog),
@@ -320,10 +282,8 @@ fn clamp_byte(value: f32) -> u8 {
     value.clamp(0.0, 255.0) as u8
 }
 
-/// Nearest-texel sample from the atlas, clamped to its bounds.
-///
-/// `u` and `v` are atlas coordinates, and the atlas has a margin around each
-/// tile, so clamping cannot pull in a neighbouring texture.
+/// Sample the nearest atlas texel within bounds. The atlas margin prevents
+/// clamped samples from crossing into a neighboring texture.
 fn sample_atlas(atlas: &TextureAtlas, u: f32, v: f32) -> [u8; 4] {
     if atlas.width == 0 || atlas.height == 0 {
         return [255, 255, 255, 255];
@@ -337,19 +297,13 @@ fn sample_atlas(atlas: &TextureAtlas, u: f32, v: f32) -> [u8; 4] {
     }
 }
 
-/// A category of change, meshed: the blocks that changed, and the colour laid
-/// over them.
 pub struct TintedMesh {
     pub mesh: MeshOutput,
     pub color: u32,
 }
 
-/// Draw a meshed build.
-///
-/// The mesher sorts geometry into opaque, alpha-tested and blended layers, and
-/// they are drawn in that order because that is what the sorting is for:
-/// opaque fills the picture, cut-outs punch through it, and glass and water
-/// tint whatever is already behind them.
+/// Draw opaque, alpha-tested, then blended layers. This order lets cutouts
+/// replace the background and transparent geometry shade what precedes it.
 pub fn draw(
     output: &MeshOutput,
     frame: Bounds,
@@ -369,11 +323,6 @@ pub fn draw(
     target.into_canvas()
 }
 
-/// Draw the changed blocks alone, each category's colour filtered over it.
-///
-/// This is the changes panel. It shows only what changed — a panel about the
-/// difference has nothing to say about the blocks that stayed the same — and
-/// shows it as the blocks themselves, tinted, rather than as coloured cubes.
 pub fn draw_changes(
     categories: &[TintedMesh],
     frame: Bounds,

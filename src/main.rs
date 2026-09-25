@@ -51,10 +51,8 @@ use crate::raster::{Layout, Panel, Picture, Segment, Theme, pack, rgb, tint};
 use crate::render::{Bounds, Camera, Grid, block_color};
 use crate::terminal::Output;
 
-/// Git's stand-in for a side that does not exist.
 const DEV_NULL: &str = "/dev/null";
 
-/// Parse one `--yaw`/`--pitch` value, naming the flag it came from.
 fn parse_angle(flag: &'static str) -> impl Fn(String) -> Result<f32, String> + Clone {
     move |raw: String| {
         raw.trim()
@@ -63,7 +61,6 @@ fn parse_angle(flag: &'static str) -> impl Fn(String) -> Result<f32, String> + C
     }
 }
 
-/// Parse `--zoom`, which additionally must be positive.
 fn parse_zoom(raw: String) -> Result<f32, String> {
     parse_angle("--zoom")(raw)
         .and_then(|zoom| {
@@ -73,28 +70,6 @@ fn parse_zoom(raw: String) -> Result<f32, String> {
         })
 }
 
-/// render Minecraft schematic diffs in the terminal
-///
-/// Inspect a schematic or diff two schematics directly:
-///     schematic-diff <file>
-///     schematic-diff <before> <after>
-///
-/// Or use as git's external diff:
-///     git config diff.schematic.command schematic-diff
-///     git diff
-/// SUPPORTED FORMATS:
-///     .litematic  .schem  .schematic  .nbt  .snbt  .mcstructure  .nusn
-///
-/// GIT SETUP:
-///     git config --global diff.schematic.command schematic-diff
-///     printf '*.litematic diff=schematic\n' >> ~/.config/git/attributes
-///
-///     Every extension listed above needs its own line in that attributes file.
-///     Files without one keep git's normal text diff.
-///
-/// ENVIRONMENT:
-///     SCHEMATIC_DIFF_KITTY=1|0  Force image output on or off
-/// How `--stat` formats its output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatMode {
     /// Print all blocks without truncation.
@@ -119,6 +94,7 @@ fn stat_parser() -> impl Parser<Option<StatMode>> {
 
 #[derive(Clone, Debug, Bpaf)]
 #[bpaf(options, version(env!("CARGO_PKG_VERSION")))]
+/// render Minecraft schematic diffs in the terminal
 struct Cli {
     /// camera horizontal angle, in degrees
     #[bpaf(
@@ -187,8 +163,6 @@ const REMOVED_TEXT: [u8; 3] = [228, 138, 133];
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        // `--help`/`--version` from the parser: the output goes to stdout,
-        // exit 0 — the same split `bpaf` itself makes.
         Err(Error::HelpExit(failure)) => {
             failure.print_message(100);
             ExitCode::SUCCESS
@@ -200,9 +174,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// A parsed command line.
 struct Invocation {
-    /// The path or paths being compared, used as the heading.
     display_path: String,
     before: Option<PathBuf>,
     after: Option<PathBuf>,
@@ -289,9 +261,6 @@ fn run() -> Result<()> {
     let mut output = Output::detect();
     let draw_image = output.is_terminal() && kitty::supported(invocation.kitty);
 
-    // The image occupies everything above the text, so that is the area it is
-    // laid out for. One spare row keeps the last text line from scrolling the
-    // image, since a placed image scrolls with the text it sits over.
     let stat = match invocation.stat {
         Some(mode) => format_stat(&before, &after, changes.as_ref(), invocation.standalone, mode),
         None => Vec::new(),
@@ -323,7 +292,6 @@ fn run() -> Result<()> {
         std::fs::write(path, &rendered.png)?;
     }
 
-    // The heading names the file the picture belongs to, so it goes above it.
     write_heading(&mut output, &invocation, &before, &after)?;
 
     if let Some(rendered) = &rendered
@@ -368,9 +336,6 @@ fn render_scene(
     output: &Output,
     stat_len: usize,
 ) -> Result<Rendered> {
-    // With a pack the build is meshed — real geometry, real textures; without
-    // one it is a grid of coloured cubes. Two paths, but they share a camera
-    // and a framing, so swapping between them is not a change of viewpoint.
     let (before_mesh, after_mesh) = rayon::join(
         || match (pack, before) {
             (Some(pack), Some(loaded)) => pack.mesh(&loaded.schematic).map(Some),
@@ -392,8 +357,6 @@ fn render_scene(
         (bg?, ag?)
     };
 
-    // One frame for every panel: framing each side to its own extent would
-    // rescale the two independently and hide the size change being inspected.
     let frame = if meshed {
         [before_mesh.as_ref(), after_mesh.as_ref()]
             .into_iter()
@@ -409,8 +372,6 @@ fn render_scene(
     }
     .unwrap_or_default();
 
-    // The changes panel, in the form this run's renderer draws it: a grid of
-    // coloured blocks without a pack, one mesh per category with one.
     let flat_changes = (pack.is_none() && !categories.is_empty())
         .then(|| changes_grid(frame, categories))
         .transpose()?;
@@ -419,7 +380,7 @@ fn render_scene(
             .par_iter()
             .map(|category| {
                 Ok(TintedMesh {
-                    mesh: pack.mesh(&subset(&category.cells))?,
+                    mesh: pack.mesh(&schematic_from_cells(&category.cells))?,
                     color: category.color,
                 })
             })
@@ -434,6 +395,7 @@ fn render_scene(
         stat_len as u32,
         invocation.standalone,
     );
+    // Reserve one spare row so trailing text does not scroll the placed image.
     let fit_height = output.screen.rows.saturating_sub(text_lines + 1);
     let default_height = (output.screen.rows.saturating_sub(5)).max(18);
     let image_cells = if fit_height >= 12 {
@@ -443,9 +405,6 @@ fn render_scene(
     };
     let (width, height) = output.image_pixels(image_cells);
 
-    // One `--pack` decides the renderer for the whole run, and a side that does
-    // not exist simply has no mesh — so the choice keys off whether the run is
-    // meshed at all, not off whether both sides produced one.
     let scene = if meshed {
         Scene::Meshed {
             before: before_mesh.as_ref(),
@@ -474,21 +433,12 @@ fn render_scene(
     Ok(Rendered { png, image_cells })
 }
 
-/// Report a problem with this run's own arguments.
-///
-/// Emitted for every file git asks about. A flag the user wrote is their
-/// instruction, and a run that quietly ignored it would be the worst outcome —
-/// worse than the same line repeated once per changed file. Reporting per file
-/// is also what a multi-file tool normally does, and the degradation is
-/// genuinely per file: every one of them renders without the pack.
+/// Report a run-specific argument error. Git invokes this once per changed path.
 fn report(message: std::fmt::Arguments<'_>) {
     eprintln!("schematic-diff: {message}");
 }
 
-/// Report a condition that is the same for every file of a `git diff`.
-///
-/// Git runs an external diff once per changed path, so an environment note
-/// repeated per file adds nothing that the first one did not already say.
+/// Report a run-wide condition once, even when Git invokes the tool per path.
 fn report_once(message: std::fmt::Arguments<'_>) {
     if std::env::var("GIT_DIFF_PATH_COUNTER").is_ok_and(|counter| counter != "1") {
         return;
@@ -496,35 +446,27 @@ fn report_once(message: std::fmt::Arguments<'_>) {
     report(message);
 }
 
-/// The diff, in the form it will be drawn.
+/// A run uses one renderer for every panel: flat or meshed.
 ///
-/// One `--pack` decides the renderer for the whole run, so a diff is either all
-/// flat or all meshed and never a mixture. Splitting the two representations
-/// into separate variants says that in the type rather than in a comment.
-///
-/// The changed cells are not a variant of this: both renderers put them in the
-/// same three-panel layout, so they are carried alongside the scene instead.
+/// Both representations keep the same before, after, and optional changes
+/// layout; the variants differ only in their panel sources.
 enum Scene<'a> {
     Flat {
         before: Option<&'a Grid>,
         after: Option<&'a Grid>,
-        /// The changed blocks as a grid, for the changes panel.
         changes: Option<&'a Grid>,
     },
     Meshed {
         before: Option<&'a nucleation::meshing::MeshOutput>,
         after: Option<&'a nucleation::meshing::MeshOutput>,
-        /// The changed blocks, one mesh per category, for the changes panel.
         changes: &'a [TintedMesh],
     },
 }
 
-/// The extent of a meshed build, rounded out to whole cells.
+/// Bounding box in integer cell coordinates, rounded out from mesh bounds.
 fn mesh_bounds(output: &nucleation::meshing::MeshOutput) -> Bounds {
     let min = output.bounds.min;
     let max = output.bounds.max;
-    // The mesh's extent is in world units; the camera frames whole cells, so
-    // the bounds are rounded out to the cells the geometry occupies.
     Bounds {
         min: [
             min[0].floor() as i32,
@@ -539,12 +481,10 @@ fn mesh_bounds(output: &nucleation::meshing::MeshOutput) -> Bounds {
     }
 }
 
-/// One category of change: the changed cells, and the colour they are shown in.
 struct Category<'a> {
     color: u32,
-    /// Each changed cell with the block to draw in it. For a removal that is the
-    /// block that used to be there; every other category shows the block that is
-    /// there now, which is what the change produced.
+    /// Each changed cell with the block to draw in it. Removals use the block
+    /// from the before build; other categories use the block from the after build.
     ///
     /// Taken from the diff rather than looked up in either build, because the
     /// diff reports every cell in the after build's frame — the same frame the
@@ -552,11 +492,8 @@ struct Category<'a> {
     cells: Vec<((i32, i32, i32), &'a BlockState)>,
 }
 
-/// The changes, grouped into the categories they are drawn in.
-///
-/// Grouping is what lets each category be drawn in its own colour: a category is
-/// meshed on its own, and the colour is applied as the panel is rasterized, so
-/// the renderer never has to work out which category a triangle belongs to.
+/// Group changes by category so each category can carry its own color through
+/// the renderer.
 fn change_categories(changes: Option<&Diff>) -> Vec<Category<'_>> {
     let Some(changes) = changes else {
         // A change is defined against both sides, so a diff of an added or a
@@ -603,15 +540,8 @@ fn change_categories(changes: Option<&Diff>) -> Vec<Category<'_>> {
     .collect()
 }
 
-/// The changed blocks as a grid, for the flat renderer's changes panel.
-///
-/// Each cell holds the colour of the block that changed, with the category's
-/// colour laid over it — the same treatment the meshed panels give their
-/// textures, and what keeps the two renderers showing the same thing.
-///
-/// The grid spans the union extent, because a removal can sit outside the after
-/// build's own bounds: that is precisely what a shrunken build looks like, and
-/// it has to stay visible.
+/// Build the changes grid over the union extent so removals outside the after
+/// build remain visible.
 fn changes_grid(frame: Bounds, categories: &[Category<'_>]) -> Result<Grid> {
     let mut grid = Grid::empty_over(frame)?;
     for category in categories {
@@ -623,19 +553,14 @@ fn changes_grid(frame: Bounds, categories: &[Category<'_>]) -> Result<Grid> {
     Ok(grid)
 }
 
-/// One category's cells as a schematic of their own, ready to mesh.
-///
-/// The mesher draws exactly what it is given, so handing it a category's cells
-/// and nothing else is what keeps the changes panel to the blocks that changed.
-fn subset(cells: &[((i32, i32, i32), &BlockState)]) -> UniversalSchematic {
-    let mut subset = UniversalSchematic::new(String::new());
+fn schematic_from_cells(cells: &[((i32, i32, i32), &BlockState)]) -> UniversalSchematic {
+    let mut schematic = UniversalSchematic::new(String::new());
     for ((x, y, z), block) in cells {
-        subset.set_block(*x, *y, *z, block);
+        schematic.set_block(*x, *y, *z, block);
     }
-    subset
+    schematic
 }
 
-/// Rasterize one side, if it exists.
 fn grid_of(side: &Option<Loaded>) -> Result<Option<Grid>> {
     match side {
         Some(loaded) => Ok(Some(Grid::from_schematic(&loaded.schematic)?)),
@@ -650,11 +575,8 @@ fn load_side(path: Option<&Path>) -> Result<Option<Loaded>> {
     }
 }
 
-/// Choose the panels and composite them.
-///
-/// The layout is the same in both renderers — before, after, then the changed
-/// blocks — so only what each panel is drawn from differs, which is exactly the
-/// difference [`Scene`] carries.
+/// Convert the scene representation into before, after, and optional changes
+/// panels.
 fn compose_image(invocation: &Invocation, scene: &Scene<'_>, layout: Layout) -> raster::Canvas {
     let (before_name, after_name) = invocation.labels();
     let (before, after, changes) = match *scene {
@@ -724,8 +646,6 @@ fn compose_image(invocation: &Invocation, scene: &Scene<'_>, layout: Layout) -> 
     raster::compose(&panels, &invocation.camera, &layout, &Theme::default())
 }
 
-/// The caption of the changes panel, one segment per category, each drawn in
-/// the colour of the blocks it names.
 fn change_legend() -> Vec<Segment> {
     vec![
         Segment::new("CHANGES  ", CAPTION_TEXT),
@@ -736,8 +656,7 @@ fn change_legend() -> Vec<Segment> {
     ]
 }
 
-/// How many lines the summary prints: the heading, one line per side that
-/// loaded, the change tally, and the pack line when one was given.
+/// Count summary lines to reserve the terminal rows occupied by text.
 fn summary_lines(
     before: &Option<Loaded>,
     after: &Option<Loaded>,
@@ -753,7 +672,6 @@ fn summary_lines(
     base + u32::from(pack) + stat_lines
 }
 
-/// The line naming the path and what happened to it.
 fn write_heading(
     out: &mut impl Write,
     invocation: &Invocation,
@@ -771,7 +689,6 @@ fn write_heading(
     writeln!(out, "{}  [{status}]", invocation.display_path)
 }
 
-/// What each side held, what changed between them, and what the pack contained.
 fn write_details(
     out: &mut impl Write,
     invocation: &Invocation,
@@ -827,7 +744,6 @@ fn write_details(
     Ok(())
 }
 
-/// Block-level breakdown of materials or changes.
 fn format_stat(
     before: &Option<Loaded>,
     after: &Option<Loaded>,
@@ -1128,7 +1044,6 @@ fn count_non_air_blocks_parallel(schematic: &UniversalSchematic) -> usize {
         .sum()
 }
 
-/// One side's size, block count and provenance, for the summary.
 fn describe(loaded: &Loaded) -> String {
     let schematic = &loaded.schematic;
     let (x, y, z) = schematic.get_tight_dimensions();
@@ -1163,14 +1078,10 @@ fn no_image_reason(invocation: &Invocation, output: &Output) -> String {
 
 /// Parse the command line, returning `None` for `--version`.
 ///
-/// `--help` and parse failures never return: `run_inner` reports them through
-/// [`Error`], and `main` prints the held `--help` output to stdout (exit 0)
-/// or the failure to stderr (exit 1). Failures the derive cannot express —
-/// git's 7-or-9 positionals — stay as checks below.
+/// Help and parse failures return through [`Error`] so `main` owns output and
+/// exit status. The derive handles ordinary options; the positional protocol
+/// below handles Git's external-diff arguments.
 fn parse_args() -> Result<Option<Invocation>> {
-    // `run_inner` rather than `run`: this keeps `--help` and parse failures
-    // inside `Result`, so `main` owns the exit path and `--help` stays text
-    // on stdout instead of a process exit buried in the parser.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let refs: Vec<&str> = args
         .iter()
@@ -1266,7 +1177,7 @@ fn parse_args() -> Result<Option<Invocation>> {
         standalone,
     }))
 }
-/// Which of `--kitty`/`--no-kitty` came last on the command line.
+
 fn last_kitty_flag(args: &[OsString]) -> Option<bool> {
     args.iter().rev().find_map(|arg| match arg.to_str()? {
         "--kitty" => Some(true),
@@ -1275,17 +1186,11 @@ fn last_kitty_flag(args: &[OsString]) -> Option<bool> {
     })
 }
 
-/// Treat git's `/dev/null` placeholder as "this side does not exist".
 fn side_path(raw: &OsStr) -> Option<PathBuf> {
     (raw != OsStr::new(DEV_NULL)).then(|| PathBuf::from(raw))
 }
 
-/// Expand a leading `~` in a user-supplied path.
-///
-/// The command line usually reaches this tool from a git config string, where
-/// `--pack=~/pack.zip` looks right but arrives literally: a shell only expands
-/// `~` at the start of a word, and here it follows the `=`. Expanding it here is
-/// what lets a config keep the home-relative path a person would write.
+/// Expand a leading `~` in a path supplied through Git's command string.
 fn expand_tilde_path(path: &Path) -> PathBuf {
     let raw = path.as_os_str();
     let rest = raw

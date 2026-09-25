@@ -16,38 +16,24 @@ name = "schematic-diff"
 path = "src/main.rs"
 
 [dependencies]
-# Format loading, diffing, the baked block colour table, and mesh production.
-#
-# Pinned to 0.10.14: from 0.10.15 onward, `meshing` does not build from
-# crates.io. The added `src/animation/glb.rs` is gated on `meshing` itself, so
-# no feature combination avoids it, and it imports the `gltf_build` API
-# (`export_build_glb`, `mesh_from_layers`, `BuildChild`, `BuildNode`,
-# `BuildScene`, `Interpolation`, `Track`). Nucleation depends on the mesher via
-# a dual version+git requirement pinned to a git rev that has that API, so its
-# own CI passes — but `cargo publish` resolves the version side, and published
-# `schematic-mesher 0.2.0` predates it. Every release through 0.10.24 fails for
-# registry consumers; 0.10.14 is the last one where the feature compiles.
+# Pinned because 0.10.15 through 0.10.24 enable `src/animation/glb.rs` with
+# `meshing`, but published `schematic-mesher 0.2.0` lacks the required
+# `gltf_build` API.
 nucleation = { version = "=0.10.14", default-features = false, features = [
   "meshing",
 ] }
-# The mesher nucleation's `meshing` feature uses. Taken directly as well, so the
 schematic-mesher = "0.2.0"
 
-# Vanilla-structure `.nbt` reading. Same version nucleation itself uses, so it
-# stays a single copy in the tree.
+# Keep this aligned with nucleation so the tree contains one NBT implementation.
 quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 rayon = "1.11"
-# Image encoding for the kitty protocol payload.
 png = "0.17"
 base64 = "0.22"
 
-# Command-line parsing and `--help`, derived from one struct so the two cannot
-# drift. `bpaf` supports both `--flag=value` and `--flag value`, unlike argh.
 bpaf = { version = "0.9", features = ["derive"] }
 
-# `TIOCGWINSZ`, for the terminal's size and its cell dimensions in pixels.
 libc = "0.2"
 
 [profile.release]

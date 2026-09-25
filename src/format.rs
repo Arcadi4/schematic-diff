@@ -1,15 +1,8 @@
-//! Loading every supported file format into a `UniversalSchematic`.
+//! Schematic format loading.
 //!
-//! Six of the seven formats go straight through Nucleation's `FormatManager`,
-//! which identifies the container from the bytes rather than trusting the file
-//! extension. Vanilla Java structure `.nbt` is the exception: Nucleation reads
-//! only the *text* (SNBT) spelling of that structure, so the binary container is
-//! decoded here and assembled into the same data model.
-//!
-//! Why not route `.nbt` through SNBT text as the Quick Look plugin does: that
-//! path would inherit `structure_snbt`'s 256-block-per-axis and 262,144-cell
-//! ceiling, and a real generated structure is often larger. Decoding the binary
-//! directly has no such limit.
+//! Nucleation's `FormatManager` detects most containers from their bytes. Binary
+//! vanilla structure NBT is decoded here because Nucleation's SNBT path caps
+//! structures at 256 blocks per axis and 262,144 cells.
 
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -27,17 +20,14 @@ use quartz_nbt::{NbtCompound, NbtList, NbtTag};
 
 use crate::error::{Error, Result};
 
-/// Upper bound on a structure's cells, matching the volume Nucleation's own
-/// bounded decoders allow. Guards the `.nbt` path against a decompression bomb
-/// and against allocating a grid for a corrupt size header.
+/// Cell-count ceiling for bounded Nucleation decoders and the binary NBT path.
+/// Prevents corrupt dimensions and decompression bombs from triggering huge
+/// allocations.
 const MAX_VOLUME: i64 = 512 * 1024 * 1024;
-/// Upper bound on `.nbt` size after decompression.
-const MAX_DECOMPRESSED: u32 = 1024 * 1024 * 1024;
-/// Byte budget handed to Nucleation's decoders, in place of their 256 MiB
-/// default.
+const MAX_DECOMPRESSED_BYTES: u32 = 1024 * 1024 * 1024;
+/// Input budget for Nucleation decoders, overriding their 256 MiB default.
 const MAX_NUCLEATION_INPUT: usize = 1024 * 1024 * 1024;
 
-/// The decode limits every Nucleation import runs under.
 fn nucleation_limits() -> DecodeLimits {
     DecodeLimits {
         max_input_bytes: MAX_NUCLEATION_INPUT,
@@ -45,7 +35,6 @@ fn nucleation_limits() -> DecodeLimits {
     }
 }
 
-/// A loaded schematic plus the provenance the summary reports.
 pub struct Loaded {
     pub schematic: UniversalSchematic,
     /// The format that actually parsed the file, which may differ from the
@@ -54,7 +43,6 @@ pub struct Loaded {
     pub entities: usize,
 }
 
-/// Read and decode a schematic file.
 pub fn load(path: &Path) -> Result<Loaded> {
     let bytes = std::fs::read(path)?;
     let name = path
@@ -65,7 +53,6 @@ pub fn load(path: &Path) -> Result<Loaded> {
     load_bytes(&bytes, &name)
 }
 
-/// Decode schematic `bytes` that came from a file called `name`.
 fn load_bytes(bytes: &[u8], name: &str) -> Result<Loaded> {
     if bytes.is_empty() {
         return Err(Error::message(format!("{name} is empty")));
@@ -95,8 +82,6 @@ fn load_bytes(bytes: &[u8], name: &str) -> Result<Loaded> {
     }
 }
 
-
-/// Is this a gzipped binary NBT document with the vanilla structure layout?
 fn is_binary_structure(bytes: &[u8]) -> bool {
     let raw = match maybe_gunzip(bytes, u32::MAX) {
         Ok(raw) => raw,
@@ -106,15 +91,13 @@ fn is_binary_structure(bytes: &[u8]) -> bool {
     else {
         return false;
     };
-    // `blocks` and `palette` together are what distinguishes a structure from
-    // the many other things that are NBT (level.dat, a chunk, an item).
+    // `blocks` and `palette` distinguish structures from other NBT roots such
+    // as level data, chunks, and items.
     root.contains_key("blocks") && root.contains_key("palette")
 }
 
-/// Read a vanilla Java structure `.nbt` — the format `/structure save` and
-/// structure blocks write.
 fn load_structure_nbt(bytes: &[u8], name: &str) -> Result<Loaded> {
-    let raw = maybe_gunzip(bytes, MAX_DECOMPRESSED)?;
+    let raw = maybe_gunzip(bytes, MAX_DECOMPRESSED_BYTES)?;
     let (root, _) = quartz_nbt::io::read_nbt(&mut Cursor::new(&raw), Flavor::Uncompressed)
         .map_err(|error| Error::message(format!("{name} is not readable NBT: {error}")))?;
 
@@ -164,8 +147,8 @@ fn load_structure_nbt(bytes: &[u8], name: &str) -> Result<Loaded> {
         let Some(position) = triple(entry, "pos") else {
             return Err(unreadable());
         };
-        // Positions are already validated against `size` above only in shape;
-        // a malformed file can still point outside the grid.
+        // Reject coordinates outside the declared grid even when the dimensions
+        // themselves are well formed.
         if position
             .iter()
             .enumerate()
@@ -213,8 +196,8 @@ fn load_structure_nbt(bytes: &[u8], name: &str) -> Result<Loaded> {
             let Some(NbtTag::Compound(nbt)) = entry.inner().get("nbt") else {
                 continue;
             };
-            // Vanilla ignores entity records with no type id; so do we, and we
-            // do not let one odd record fail the whole load.
+            // Match vanilla by ignoring entities without a type id instead of
+            // failing the whole load.
             if !nbt.contains_key("id") && !nbt.contains_key("Id") {
                 continue;
             }
@@ -237,7 +220,6 @@ fn load_structure_nbt(bytes: &[u8], name: &str) -> Result<Loaded> {
     })
 }
 
-/// Read the structure palette as ready-to-parse block-state strings.
 fn read_palette(root: &NbtCompound) -> Option<Vec<String>> {
     let NbtTag::List(palette) = root.inner().get("palette")? else {
         return None;
@@ -260,8 +242,8 @@ fn read_palette(root: &NbtCompound) -> Option<Vec<String>> {
                 properties.push((key.clone(), value.clone()));
             }
         }
-        // Property order is not meaningful, and sorting it means two files that
-        // differ only in serialization order compare equal.
+        // Property order is not meaningful; sorting avoids false diffs caused
+        // by serialization order alone.
         properties.sort();
         states.push(if properties.is_empty() {
             name
@@ -303,7 +285,7 @@ fn triple(compound: &NbtCompound, key: &str) -> Option<[i32; 3]> {
     Some([*x, *y, *z])
 }
 
-/// Read a three-element floating-point vector, as entity positions use.
+/// Read a three-element f64 NBT list, as used for entity positions.
 fn double_triple(compound: &NbtCompound, key: &str) -> Option<[f64; 3]> {
     let NbtTag::List(list) = compound.inner().get(key)? else {
         return None;
@@ -322,12 +304,10 @@ fn double_triple(compound: &NbtCompound, key: &str) -> Option<[f64; 3]> {
     Some([*x, *y, *z])
 }
 
-/// Decompress if the bytes are gzipped, refusing anything that declares itself
-/// larger than `limit`.
+/// Decompress gzip data when present, rejecting declared output over `limit`.
 ///
-/// The gzip trailer's ISIZE is what the inflater sizes its output buffer from,
-/// so reading it up front is both the bomb guard and a bound on the cost of the
-/// decode.
+/// The gzip trailer's ISIZE sizes the inflater output buffer, so reading it up
+/// front bounds both allocation and decode work.
 fn maybe_gunzip(bytes: &[u8], limit: u32) -> Result<Vec<u8>> {
     if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
         return Ok(bytes.to_vec());

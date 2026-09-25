@@ -1,38 +1,25 @@
-//! The kitty graphics protocol: capability detection and PNG display.
+//! Kitty graphics protocol support for transmitting a PNG over terminal cells.
 //!
-//! Reference: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>.
-//!
-//! Only the part a print-and-exit diff tool needs is implemented: transmit a
-//! PNG and place it over a rectangle of cells. Images are sent with `f=100`
-//! (PNG), so the payload is compressed before it is base64'd rather than after.
+//! Reference: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>. PNG payloads
+//! use `f=100` and are compressed before base64 encoding.
 
 use std::io::{self, Write};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-/// The largest number of base64 characters one escape sequence may carry; the
-/// spec fixes this at 4096.
+/// Protocol maximum number of base64 characters in one escape sequence.
 const CHUNK_CHARS: usize = 4096;
 
-/// Raw bytes that encode to exactly one whole chunk.
-///
-/// 3072 is a multiple of 3, so base64 emits no padding and every chunk but the
-/// last is exactly [`CHUNK_CHARS`] characters — which is what the spec requires
-/// of all but the final chunk.
+/// Raw bytes that encode to one full chunk without base64 padding.
 const CHUNK_BYTES: usize = CHUNK_CHARS / 4 * 3;
 
-/// Introducer for an APC (Application Programming Command) sequence.
 const APC: &[u8] = b"\x1b_G";
-/// String terminator.
 const ST: &[u8] = b"\x1b\\";
 
-/// Whether the attached terminal can be asked to draw an image.
 pub fn supported(mode: Option<bool>) -> bool {
-    // Detection is by environment variable, which is a heuristic: the
-    // authoritative method is to query the terminal and wait for a reply, but
-    // that needs the tty in raw mode and a timeout to race, and losing that race
-    // hangs the tool. `--kitty` / `--no-kitty` cover anything this misses.
+    // Active terminal queries need raw mode and a timeout race, which can hang
+    // an external diff. Environment variables are the safer heuristic.
     let Some(forced) = mode else {
         return std::env::var_os("KITTY_WINDOW_ID").is_some()
             || std::env::var_os("KONSOLE_VERSION").is_some()
@@ -46,10 +33,8 @@ pub fn supported(mode: Option<bool>) -> bool {
     forced
 }
 
-/// Wrap one escape sequence for transport through tmux, if tmux is in the way.
-///
-/// tmux needs `set -g allow-passthrough on` for the wrapped sequence to reach
-/// the terminal underneath.
+/// Wrap Kitty escape sequences for tmux passthrough. tmux requires
+/// `set -g allow-passthrough on`.
 fn framed(sequence: &[u8]) -> Vec<u8> {
     if std::env::var_os("TMUX").is_none() {
         return sequence.to_vec();
@@ -67,13 +52,8 @@ fn framed(sequence: &[u8]) -> Vec<u8> {
     wrapped
 }
 
-/// Write the escape sequences that place `png` over `columns` x `rows` cells.
-///
-/// `C=1` leaves the cursor where it was, so the caller decides what follows an
-/// image instead of depending on where the terminal would have moved it.
-///
-/// The PNG is encoded a chunk at a time rather than in one pass, so the base64
-/// of a whole screenshot is never held alongside the screenshot itself.
+/// Transmits a PNG in protocol-sized chunks and positions it over the cell
+/// rectangle. `C=1` leaves the cursor position unchanged.
 pub fn write_png(out: &mut impl Write, png: &[u8], columns: u32, rows: u32) -> io::Result<()> {
     let mut chunks = png.chunks(CHUNK_BYTES).peekable();
     let mut first = true;
@@ -82,9 +62,8 @@ pub fn write_png(out: &mut impl Write, png: &[u8], columns: u32, rows: u32) -> i
         let mut sequence = Vec::with_capacity(chunk.len() / 3 * 4 + 64);
         sequence.extend_from_slice(APC);
         if first {
-            // `a=T` transmit and display, `f=100` PNG, and `q=2` suppresses
-            // both the OK and the failure reply so nothing is left in the
-            // input queue for whatever runs next.
+            // `a=T` transmits and displays, `f=100` selects PNG, and `q=2`
+            // suppresses terminal replies that would remain in the input queue.
             write!(sequence, "a=T,f=100,c={columns},r={rows},C=1,q=2,m={more};")?;
             first = false;
         } else {

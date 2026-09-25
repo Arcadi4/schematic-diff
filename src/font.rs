@@ -1,8 +1,4 @@
-//! The bitmap font the panel captions are drawn with.
-//!
-//! Captions live inside the image rather than in terminal text: the kitty
-//! protocol places one picture over a rectangle of cells, so text printed
-//! around it is not reliably aligned with the picture it labels.
+//! 5x7 bitmap font rendering for panel captions.
 
 /// Columns a glyph occupies, including the one column of spacing after it.
 pub const ADVANCE: u32 = 6;
@@ -270,7 +266,7 @@ fn glyph(c: char) -> [u8; 7] {
         .unwrap_or([0; 7])
 }
 
-/// The width in pixels of `characters` glyphs at `scale`.
+/// Width of `characters` glyphs at `scale`, excluding trailing glyph spacing.
 pub fn text_width(characters: usize, scale: u32) -> u32 {
     if characters == 0 {
         return 0;
@@ -278,7 +274,7 @@ pub fn text_width(characters: usize, scale: u32) -> u32 {
     (characters as u32 * ADVANCE - 1) * scale
 }
 
-/// Draw `text` with its top-left at `(x, y)`, one font pixel per `scale`.
+/// Draw ASCII text from `(x, y)`, normalizing case and leaving unmapped glyphs blank.
 pub fn draw(
     canvas: &mut crate::raster::Canvas,
     x: i64,

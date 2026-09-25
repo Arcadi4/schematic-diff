@@ -1,18 +1,8 @@
-//! A resource-pack-free CPU renderer for schematics.
+//! CPU raycast renderer used when no resource pack is supplied.
 //!
-//! Nucleation's own `rendering` feature needs a Minecraft client jar (or a
-//! resource pack zip) to mesh textures before wgpu can draw anything. A tool
-//! that has to run on a bare checkout cannot require that, so this module draws
-//! the build itself with a perspective voxel raycast: one ray per pixel walks a
-//! uniform grid to the first occupied cell and shades it by the face it entered
-//! through, with depth fog.
-//!
-//! Colours come from Nucleation's `blockpedia` — the texture-derived
-//! average-colour table the library ships for palette work — with a stable hash
-//! behind it so a block the table does not know is a consistent colour rather
-//! than a hole. This is the fallback appearance: one colour per block, no
-//! textures, no model geometry. `--pack` does not come through here; it meshes
-//! the build and draws triangles instead.
+//! Each pixel casts a ray through the voxel grid and shades the first occupied
+//! cell. Colors come from Nucleation's baked block table, with a stable nonzero
+//! fallback for unknown blocks. Packed builds use the mesh renderer instead.
 
 use rayon::prelude::*;
 use nucleation::{BlockState, UniversalSchematic};
@@ -20,17 +10,13 @@ use nucleation::{BlockState, UniversalSchematic};
 use crate::error::{Error, Result};
 use crate::raster::Canvas;
 
-/// Cells above this are refused rather than allocated.
+/// Maximum grid volume in cells permitted before refusing to allocate.
 ///
-/// This is a memory budget, not a correctness limit. A cell is four bytes, so
-/// the cap is 256 MiB. Nucleation's own decoder allows far more — its
-/// `DecodeLimits::max_volume` is 512 M cells — but that bounds what may be
-/// *parsed*, and a grid that large would cost gigabytes to allocate and minutes
-/// to raycast, in a terminal showing the result at roughly 1200x600.
+/// At four bytes per cell, this permits a 2 GiB grid. The ceiling bounds memory
+/// use and raycast time for outsized schematics.
 pub const MAX_CELLS: i64 = 512 * 1024 * 1024;
 
-/// The cell count a grid over `size` needs, refusing degenerate or
-/// unrepresentable extents.
+/// Compute a grid's cell count, rejecting non-positive or overflowing extents.
 fn grid_cell_count(size: [i32; 3]) -> Result<i64> {
     i64::from(size[0])
         .checked_mul(i64::from(size[1]))
@@ -64,7 +50,6 @@ pub struct Bounds {
 }
 
 impl Default for Bounds {
-    /// The degenerate box at the origin, for a run with no build to frame.
     fn default() -> Self {
         Self {
             min: [0; 3],
@@ -120,7 +105,6 @@ impl Bounds {
     }
 }
 
-/// How the camera is aimed at a build.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub yaw_deg: f32,
@@ -131,7 +115,7 @@ pub struct Camera {
 
 impl Default for Camera {
     fn default() -> Self {
-        // The three-quarter view that reads most builds legibly.
+        // A three-quarter view keeps most block shapes legible.
         Self {
             yaw_deg: 45.0,
             pitch_deg: 30.0,
@@ -140,11 +124,10 @@ impl Default for Camera {
     }
 }
 
-/// Where a camera looks from, and the basis it looks along.
+/// Camera origin and basis derived from [`Camera`].
 ///
-/// `render` and `mesh` both need this, and both derive it from [`Camera`], so
-/// the two renderers frame a build identically and swapping between them is not
-/// a change of viewpoint.
+/// Both renderers derive this from the same camera so switching render modes
+/// does not change the viewpoint.
 pub struct Eye {
     pub position: [f32; 3],
     pub right: [f32; 3],
@@ -168,7 +151,7 @@ pub struct Grid {
 }
 
 impl Grid {
-    /// Rasterize every non-air block of `schematic` into a grid.
+    /// Build a dense grid from every non-air block in `schematic`.
     pub fn from_schematic(schematic: &UniversalSchematic) -> Result<Self> {
         let mut bounds: Option<Bounds> = None;
         for (position, block) in schematic.iter_blocks() {
@@ -224,10 +207,6 @@ impl Grid {
         }
     }
 
-    /// An all-empty grid spanning `bounds`.
-    ///
-    /// Used for the changes panel, which has to cover the union of both builds:
-    /// a removal can sit outside the after build's own extent.
     pub fn empty_over(bounds: Bounds) -> Result<Self> {
         let size = bounds.size();
         let cells = grid_cell_count(size)?;
@@ -244,7 +223,6 @@ impl Grid {
         })
     }
 
-    /// Flat index of a cell, or `None` if it lies outside the grid.
     fn index(&self, x: i32, y: i32, z: i32) -> Option<usize> {
         let (dx, dy, dz) = (x - self.min[0], y - self.min[1], z - self.min[2]);
         if dx < 0
@@ -259,7 +237,6 @@ impl Grid {
         Some((dy as usize * self.dims[2] + dz as usize) * self.dims[0] + dx as usize)
     }
 
-    /// The colour at a cell, or `None` if it is empty or out of range.
     fn color_at(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let cell = self.cells[self.index(x, y, z)?];
         (cell != 0).then_some(cell)
@@ -272,23 +249,16 @@ impl Grid {
     }
 }
 
-/// Is this block absence rather than matter?
 pub fn is_air(block: &BlockState) -> bool {
     is_air_name(block.get_name())
 }
 
-/// Whether a block name, with or without its `minecraft:` prefix, is air.
 fn is_air_name(name: &str) -> bool {
     let short = name.strip_prefix("minecraft:").unwrap_or(name);
     matches!(short, "air" | "cave_air" | "void_air")
 }
 
-/// `0xRRGGBB` for a block, from Nucleation's baked colour table.
-///
-/// The fallbacks exist because the table cannot cover everything a schematic may
-/// contain — a newer game version, a datapack, a mod. Returning a stable
-/// non-zero colour keeps those blocks visible and keeps the `0` sentinel
-/// meaning only "empty".
+/// Return a stable nonzero color when the baked table lacks a block.
 pub fn block_color(block: &BlockState) -> u32 {
     let name = block.get_name();
     if let Some(facts) = nucleation::blockpedia::BLOCKS.get(name)
@@ -303,8 +273,7 @@ pub fn block_color(block: &BlockState) -> u32 {
     fallback_color(name)
 }
 
-/// A hand table for the blocks that matter most in redstone builds, then dye
-/// families, then a stable hash.
+/// Resolve unknown colors by known-block table, dye family, then stable hash.
 fn fallback_color(name: &str) -> u32 {
     let short = name.strip_prefix("minecraft:").unwrap_or(name);
     let table: u32 = match short {
@@ -437,7 +406,7 @@ pub fn render(grid: &Grid, frame: Bounds, camera: &Camera, width: u32, height: u
         radius,
     } = eye;
 
-    let tan_half = (50.0f32.to_radians() / 2.0).tan();
+    let tan_half = (Camera::VERTICAL_FOV_DEG.to_radians() / 2.0).tan();
     let aspect = width as f32 / height as f32;
     let max_t = distance + radius * 4.0;
     let scene = Scene {
@@ -473,15 +442,12 @@ pub fn render(grid: &Grid, frame: Bounds, camera: &Camera, width: u32, height: u
     canvas
 }
 
-/// Everything a ray needs beyond its own path.
 struct Scene<'a> {
     grid: &'a Grid,
-    /// Eye distance and scene radius, which together set the depth fog.
     distance: f32,
     radius: f32,
 }
 
-/// One ray through the scene.
 struct Ray {
     origin: [f32; 3],
     direction: [f32; 3],
@@ -495,11 +461,7 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     [v[0] / length, v[1] / length, v[2] / length]
 }
 
-/// How much light a face receives, from the index [`box_span`] reports.
-///
-/// Faces 0 to 2 are the positive direction of each axis, 3 to 5 the negative:
-/// tops are lit, X-axis faces catch the side light, and Y faces fall in
-/// between.
+/// Map entry-face indices 0..=5 to directional light levels.
 fn face_shade(face: u8) -> f32 {
     match face {
         1 => 1.0,
@@ -514,7 +476,7 @@ fn face_shade(face: u8) -> f32 {
 const NEGATIVE_FACE: [u8; 3] = [3, 4, 5];
 const POSITIVE_FACE: [u8; 3] = [0, 1, 2];
 
-/// How far along a ray a box spans, and which face it is entered through.
+/// Return the ray's entry and exit distances and its entry-face index.
 fn box_span(
     min: [f32; 3],
     max: [f32; 3],
@@ -539,7 +501,6 @@ fn box_span(
         let inverse = 1.0 / direction[axis];
         let a = (low - origin[axis]) * inverse;
         let b = (high - origin[axis]) * inverse;
-        // The plane the ray reaches first is the one it enters through.
         let axis_face = if a < b {
             NEGATIVE_FACE[axis]
         } else {
@@ -560,10 +521,8 @@ fn box_span(
     Some((enter, exit, face))
 }
 
-/// Walk the ray to the first occupied cell, and shade it.
-///
-/// A cell is one block and every block is a cube here, so the walk tests the
-/// cell's own box: there is no geometry inside a cell to refine against.
+/// Trace the first occupied cell and shade it. Every untextured cell is a cube,
+/// so the grid bounds are sufficient for intersection tests.
 fn trace(scene: &Scene<'_>, ray: &Ray, max_t: f32) -> Option<[u8; 4]> {
     let grid = scene.grid;
     let low = [grid.min[0] as f32, grid.min[1] as f32, grid.min[2] as f32];
@@ -668,10 +627,8 @@ fn shade(face: u8, t: f32, rgb: [u8; 3], scene: &Scene<'_>) -> [u8; 4] {
 }
 
 impl Camera {
-    /// The eye and basis this camera looks from, for a build of `frame`.
-    ///
-    /// Shared by both renderers, so a build is framed identically whichever one
-    /// draws it.
+    pub const VERTICAL_FOV_DEG: f32 = 50.0;
+
     pub fn eye_and_basis(&self, frame: Bounds) -> Eye {
         let dims = [
             (frame.max[0] - frame.min[0] + 1) as f32,
