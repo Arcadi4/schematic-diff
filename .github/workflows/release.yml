@@ -144,3 +144,24 @@ jobs:
           fi
 
           cargo publish
+
+  update-homebrew-tap:
+    name: Update Homebrew tap
+    needs: [create-release, upload-assets]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger arcadi4/homebrew-tap formula update
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN secret is not set; skipping tap update."
+            exit 0
+          fi
+
+          gh workflow run update-schematic-diff-formula.yml \
+            --repo arcadi4/homebrew-tap \
+            --field version="${TAG#v}"
