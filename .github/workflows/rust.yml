@@ -6,17 +6,31 @@ on:
   pull_request:
     branches: [ "main" ]
 
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  test:
+    name: Test
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The toolchain and the lockfile decide every unit, so a cache hit turns
+      # this job into a recompile of the changed crates only.
+      - uses: Swatinem/rust-cache@v2
+
+      # `cargo test` builds the binary and the test targets itself, so the
+      # separate `cargo build` step this workflow used to run was the same
+      # compilation a second time.
+      - name: Run tests
+        run: cargo test --locked
