@@ -29,8 +29,8 @@ quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 rayon = "1.11"
-png = "0.17"
-base64 = "0.22"
+png = "0.18"
+base64 = "0.23"
 
 bpaf = { version = "0.9", features = ["derive"] }
 
