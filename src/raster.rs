@@ -3,6 +3,13 @@
 
 use crate::error::{Error, Result};
 use crate::font;
+use litematic_material::TextureSet;
+use litematic_mesh::Mesh;
+use litematic_render::{
+    Background, LightingProfile, RenderBackend, RenderOptions, render_mesh,
+    render_mesh_with_textures,
+};
+use litematic_scene::Scene;
 use nucleation::meshing::MeshOutput;
 
 use crate::mesh::{TintedMesh, draw as draw_mesh, draw_changes};
@@ -51,6 +58,25 @@ impl Canvas {
             height,
             pixels: vec![0; (width as usize) * (height as usize) * 4],
         }
+    }
+
+    /// Wrap a renderer's RGBA buffer, rejecting a size that does not match.
+    pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self> {
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| Error::message("image dimensions overflow"))?;
+        if pixels.len() != expected {
+            return Err(Error::message(format!(
+                "image buffer is {} bytes, expected {expected} for {width}x{height}",
+                pixels.len()
+            )));
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
     }
 
     fn filled(width: u32, height: u32, color: [u8; 3]) -> Self {
@@ -145,10 +171,48 @@ impl Segment {
     }
 }
 
+/// A Blockscope scene already meshed and framed to the shared panel extent.
+pub struct BlockscopePicture {
+    pub scene: Scene,
+    pub mesh: Mesh,
+    pub textures: Option<TextureSet>,
+}
+
+impl BlockscopePicture {
+    fn render(&self, camera: &Camera, width: u32, height: u32) -> Result<Canvas> {
+        let options = RenderOptions {
+            width,
+            height,
+            yaw: camera.yaw_deg,
+            elevation: camera.pitch_deg,
+            background: Background::Transparent,
+            lighting: LightingProfile::SimpleAoV1,
+            // The terminal canvas is already composited at the terminal's
+            // pixel size; matching Blockscope's default supersampling would
+            // multiply work without changing the layout.
+            supersample: 1,
+            threads: 0,
+            backend: RenderBackend::Cpu,
+            padding: (16.0 / camera.zoom.max(0.01))
+                .clamp(0.0, width.min(height) as f32 * 0.45),
+            ..Default::default()
+        };
+        let output = match &self.textures {
+            Some(textures) => {
+                render_mesh_with_textures(&self.scene, &self.mesh, &options, textures)
+            }
+            None => render_mesh(&self.scene, &self.mesh, &options),
+        }
+        .map_err(|error| Error::message(format!("litematic render failed: {error}")))?;
+        Canvas::from_rgba(output.width, output.height, output.rgba)
+    }
+}
+
 pub enum Picture<'a> {
     Flat(&'a Grid),
     Mesh(&'a MeshOutput),
     Changes(&'a [TintedMesh]),
+    Blockscope(&'a BlockscopePicture),
 }
 
 pub struct Panel<'a> {
@@ -188,10 +252,15 @@ pub fn fits(width: u32, panels: u32) -> bool {
     width >= MIN_PANEL_PIXELS * panels
 }
 
-pub fn compose(panels: &[Panel<'_>], camera: &Camera, layout: &Layout, theme: &Theme) -> Canvas {
+pub fn compose(
+    panels: &[Panel<'_>],
+    camera: &Camera,
+    layout: &Layout,
+    theme: &Theme,
+) -> Result<Canvas> {
     let mut canvas = Canvas::filled(layout.width, layout.height, theme.background);
     if panels.is_empty() || layout.width == 0 || layout.height == 0 {
-        return canvas;
+        return Ok(canvas);
     }
 
     let count = panels.len() as u32;
@@ -212,16 +281,25 @@ pub fn compose(panels: &[Panel<'_>], camera: &Camera, layout: &Layout, theme: &T
         })
         .collect();
 
-    let pictures: Vec<_> = panel_params
+    let pictures: Vec<Canvas> = panel_params
         .par_iter()
         .map(|(panel, panel_width, _, _, body_height)| match &panel.picture {
-            Picture::Flat(grid) => render(grid, layout.frame, camera, *panel_width, *body_height),
-            Picture::Mesh(mesh) => draw_mesh(mesh, layout.frame, camera, *panel_width, *body_height),
-            Picture::Changes(categories) => {
-                draw_changes(categories, layout.frame, camera, *panel_width, *body_height)
+            Picture::Flat(grid) => {
+                Ok(render(grid, layout.frame, camera, *panel_width, *body_height))
             }
+            Picture::Mesh(mesh) => {
+                Ok(draw_mesh(mesh, layout.frame, camera, *panel_width, *body_height))
+            }
+            Picture::Changes(categories) => Ok(draw_changes(
+                categories,
+                layout.frame,
+                camera,
+                *panel_width,
+                *body_height,
+            )),
+            Picture::Blockscope(picture) => picture.render(camera, *panel_width, *body_height),
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let mut x = 0u32;
     for (index, ((panel, panel_width, caption_scale, band, _), picture)) in
@@ -263,7 +341,7 @@ pub fn compose(panels: &[Panel<'_>], camera: &Camera, layout: &Layout, theme: &T
         }
     }
 
-    canvas
+    Ok(canvas)
 }
 
 fn clip_to_width(text: &str, width: u32, scale: u32) -> String {
