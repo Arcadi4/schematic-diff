@@ -465,14 +465,37 @@ fn flat_catalog(before: &Option<Scene>, after: &Option<Scene>) -> Result<Arc<Sta
     for scene in before.iter().chain(after.iter()) {
         for region in &scene.regions {
             for state in &region.palette {
-                entries
-                    .entry(state.clone())
-                    .or_insert_with(|| colors.resolve(state));
+                entries.entry(state.clone()).or_insert_with(|| {
+                    let mut resolved = colors.resolve(state);
+                    if !resolved.known {
+                        resolved.color = legacy_color(state);
+                    }
+                    resolved
+                });
             }
         }
     }
-    let missing = colors.resolve(&BlockStateKey::simple("__schematic_diff_missing"));
+    let missing = ResolvedBlock {
+        color: litematic_mesh::Rgba::rgb(0x80, 0x80, 0x80),
+        layer: litematic_mesh::RenderLayer::Opaque,
+        model: litematic_mesh::full_cube_model(),
+        known: false,
+    };
     Ok(Arc::new(StaticCatalog { entries, missing }))
+}
+
+/// Blockscope's embedded palette paints unknown states magenta. Keep the old
+/// renderer's stable lookup/table fallback instead, so an unrecognised state
+/// stays a readable colour rather than dominating the frame.
+fn legacy_color(state: &BlockStateKey) -> litematic_mesh::Rgba {
+    let packed = nucleation::BlockState::from_block_string(&state.canonical())
+        .map(|state| crate::render::block_color(&state))
+        .unwrap_or(0x80_80_80);
+    litematic_mesh::Rgba::rgb(
+        ((packed >> 16) & 0xff) as u8,
+        ((packed >> 8) & 0xff) as u8,
+        (packed & 0xff) as u8,
+    )
 }
 
 struct TintCatalog {
