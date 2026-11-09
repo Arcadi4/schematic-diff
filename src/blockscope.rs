@@ -756,6 +756,30 @@ fn project_bounds(frame: SceneBounds) -> Result<Bounds> {
     })
 }
 
+/// `--zoom` narrows the framed extent around its center, which is the same
+/// effect the flat renderer's camera zoom has. Blockscope fits the camera to the
+/// scene bounds, so shrinking those bounds zooms the build.
+fn zoomed(frame: SceneBounds, zoom: f32) -> SceneBounds {
+    if (zoom - 1.0).abs() < 1e-3 {
+        return frame;
+    }
+    let zoom = f64::from(zoom.max(0.01));
+    let mut min = [0i64; 3];
+    let mut max_exclusive = [0i64; 3];
+    for axis in 0..3 {
+        let center = (frame.min[axis] as f64 + frame.max_exclusive[axis] as f64) * 0.5;
+        let half = (frame.max_exclusive[axis] - frame.min[axis]) as f64 * 0.5 / zoom;
+        let low = (center - half).floor() as i64;
+        let mut high = (center + half).ceil() as i64;
+        if high <= low {
+            high = low + 1;
+        }
+        min[axis] = low;
+        max_exclusive[axis] = high;
+    }
+    SceneBounds { min, max_exclusive }
+}
+
 fn union(left: SceneBounds, right: SceneBounds) -> SceneBounds {
     SceneBounds {
         min: [
@@ -786,6 +810,7 @@ fn render_scene(
         (None, Some(after)) => after.bounds,
         (None, None) => return Err(Error::message("no scene to render")),
     };
+    let frame = zoomed(frame, invocation.camera.zoom);
     let bounds = project_bounds(frame)?;
 
     let catalog = match pack {
