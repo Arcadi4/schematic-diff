@@ -1,8 +1,10 @@
 //! Schematic format loading.
 //!
-//! Nucleation's `FormatManager` detects most containers from their bytes. Binary
-//! vanilla structure NBT is decoded here because Nucleation's SNBT path caps
-//! structures at 256 blocks per axis and 262,144 cells.
+//! Pure litematic pairs are routed to the Blockscope backend by `main`. This
+//! loader remains the fallback for mixed-format comparisons and all other
+//! containers. Nucleation's `FormatManager` detects most formats from their
+//! bytes; binary vanilla structure NBT is decoded here because Nucleation's
+//! SNBT path caps structures at 256 blocks per axis and 262,144 cells.
 
 use std::io::{Cursor, Read};
 use std::path::Path;

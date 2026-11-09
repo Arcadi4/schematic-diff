@@ -24,6 +24,14 @@ nucleation = { version = "=0.10.14", default-features = false, features = [
 ] }
 schematic-mesher = "0.2.0"
 
+# Blockscope remains unpublished, so the litematic backend pins a reviewed
+# upstream commit. Replace these with registry versions when the crates ship.
+litematic-core = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-core" }
+litematic-material = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-material" }
+litematic-mesh = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-mesh" }
+litematic-render = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-render" }
+litematic-scene = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-scene" }
+
 # Keep this aligned with nucleation so the tree contains one NBT implementation.
 quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }

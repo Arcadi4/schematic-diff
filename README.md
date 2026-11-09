@@ -113,6 +113,6 @@ Once you've got the resource pack, configure your `~/.gitconfig` as follows inst
 
 ## Acknowledgements
 
-Thanks to [Nucleation](https://github.com/Schem-at/Nucleation) for the format parsers and mesher.
+Thanks to [Blockscope](https://github.com/linvin-1233/blockscope) for the litematic parser, mesher, and renderer, and to [Nucleation](https://github.com/Schem-at/Nucleation) for the other format parsers and mesher.
 
 The demo uses a [tree farm](https://github.com/DuskScorpio/Scorpio-File-Downloads/tree/main/Files/Gemini) by @DuskScorpio.

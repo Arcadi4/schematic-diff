@@ -21,6 +21,7 @@
 //! and only a terminal can show an image — see [`terminal`], which is where
 //! that decision and its reasoning live.
 
+mod blockscope;
 mod error;
 mod font;
 mod format;
@@ -71,7 +72,7 @@ fn parse_zoom(raw: String) -> Result<f32, String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatMode {
+pub(crate) enum StatMode {
     /// Print all blocks without truncation.
     Uncapped,
     /// Print at most `count` entries, noting the remainder.
@@ -149,16 +150,16 @@ struct Cli {
 /// Category colours, the single source of truth for the pixels showing a change
 /// and the caption text naming it, so the legend cannot drift from what it
 /// describes.
-const ADDED_COLOR: u32 = 0x70_B9_19;
-const REMOVED_COLOR: u32 = 0xA1_27_22;
-const CHANGED_COLOR: u32 = 0xF8_C5_27;
-const SWAPPED_COLOR: u32 = 0x3A_AF_D9;
+pub(crate) const ADDED_COLOR: u32 = 0x70_B9_19;
+pub(crate) const REMOVED_COLOR: u32 = 0xA1_27_22;
+pub(crate) const CHANGED_COLOR: u32 = 0xF8_C5_27;
+pub(crate) const SWAPPED_COLOR: u32 = 0x3A_AF_D9;
 
 /// Caption greys, kept apart from the category colours so a legend stays
 /// readable even where one of those colours is dark against the background.
-const CAPTION_TEXT: [u8; 3] = [222, 226, 234];
-const ADDED_TEXT: [u8; 3] = [146, 208, 80];
-const REMOVED_TEXT: [u8; 3] = [228, 138, 133];
+pub(crate) const CAPTION_TEXT: [u8; 3] = [222, 226, 234];
+pub(crate) const ADDED_TEXT: [u8; 3] = [146, 208, 80];
+pub(crate) const REMOVED_TEXT: [u8; 3] = [228, 138, 133];
 
 fn main() -> ExitCode {
     match run() {
@@ -216,6 +217,12 @@ fn run() -> Result<()> {
         return Ok(());
     };
 
+    let mut output = Output::detect();
+    let draw_image = output.is_terminal() && kitty::supported(invocation.kitty);
+    if blockscope::handles(&invocation) {
+        return blockscope::run(&invocation, &mut output, draw_image);
+    }
+
     let ((before, after), pack) = rayon::join(
         || {
             rayon::join(
@@ -257,9 +264,6 @@ fn run() -> Result<()> {
         _ => None,
     };
     let categories = change_categories(changes.as_ref());
-
-    let mut output = Output::detect();
-    let draw_image = output.is_terminal() && kitty::supported(invocation.kitty);
 
     let stat = match invocation.stat {
         Some(mode) => format_stat(&before, &after, changes.as_ref(), invocation.standalone, mode),
@@ -322,7 +326,7 @@ fn run() -> Result<()> {
 }
 
 #[derive(Debug)]
-struct Rendered {
+pub(crate) struct Rendered {
     png: Vec<u8>,
     image_cells: u32,
 }
@@ -427,19 +431,19 @@ fn render_scene(
             cell_px: output.screen.cell_px,
             frame,
         },
-    );
+    )?;
 
     let png = raster::encode_png(&image)?;
     Ok(Rendered { png, image_cells })
 }
 
 /// Report a run-specific argument error. Git invokes this once per changed path.
-fn report(message: std::fmt::Arguments<'_>) {
+pub(crate) fn report(message: std::fmt::Arguments<'_>) {
     eprintln!("schematic-diff: {message}");
 }
 
 /// Report a run-wide condition once, even when Git invokes the tool per path.
-fn report_once(message: std::fmt::Arguments<'_>) {
+pub(crate) fn report_once(message: std::fmt::Arguments<'_>) {
     if std::env::var("GIT_DIFF_PATH_COUNTER").is_ok_and(|counter| counter != "1") {
         return;
     }
@@ -577,7 +581,11 @@ fn load_side(path: Option<&Path>) -> Result<Option<Loaded>> {
 
 /// Convert the scene representation into before, after, and optional changes
 /// panels.
-fn compose_image(invocation: &Invocation, scene: &Scene<'_>, layout: Layout) -> raster::Canvas {
+fn compose_image(
+    invocation: &Invocation,
+    scene: &Scene<'_>,
+    layout: Layout,
+) -> Result<raster::Canvas> {
     let (before_name, after_name) = invocation.labels();
     let (before, after, changes) = match *scene {
         Scene::Flat {
@@ -1062,7 +1070,7 @@ fn describe(loaded: &Loaded) -> String {
 }
 
 /// Why no image was drawn, phrased as what to do about it.
-fn no_image_reason(invocation: &Invocation, output: &Output) -> String {
+pub(crate) fn no_image_reason(invocation: &Invocation, output: &Output) -> String {
     if let Some(path) = &invocation.output {
         return format!("no image drawn; it was written to {}", path.display());
     }
