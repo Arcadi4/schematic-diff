@@ -43,19 +43,10 @@ fn alloc_cells(cells: i64, size: [i32; 3]) -> Result<Vec<u32>> {
 }
 
 /// An axis-aligned inclusive voxel extent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Bounds {
     pub min: [i32; 3],
     pub max: [i32; 3],
-}
-
-impl Default for Bounds {
-    fn default() -> Self {
-        Self {
-            min: [0; 3],
-            max: [0; 3],
-        }
-    }
 }
 
 impl Bounds {
