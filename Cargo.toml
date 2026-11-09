@@ -1,12 +1,11 @@
 [package]
 name = "schematic-diff"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.98"
 description = "git diff extension for Minecraft schematic & NBT files"
 license = "MIT"
 repository = "https://github.com/Arcadi4/schematic-diff"
-homepage = "https://github.com/Arcadi4/schematic-diff"
 readme = "README.md"
 keywords = ["minecraft", "git", "diff", "cli", "terminal"]
 categories = ["command-line-utilities", "graphics"]
@@ -24,13 +23,12 @@ nucleation = { version = "=0.10.14", default-features = false, features = [
 ] }
 schematic-mesher = "0.2.0"
 
-# Blockscope remains unpublished, so the litematic backend pins a reviewed
-# upstream commit. Replace these with registry versions when the crates ship.
-litematic-core = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-core" }
-litematic-material = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-material" }
-litematic-mesh = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-mesh" }
-litematic-render = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-render" }
-litematic-scene = { git = "https://github.com/linvin-1233/blockscope", rev = "f7cefd6cb2a447c7ae217e100a1e8727659bb351", package = "litematic-scene" }
+# Blockscope crates provide the litematic backend.
+litematic-core = "0.5.1"
+litematic-material = "0.5.1"
+litematic-mesh = "0.5.1"
+litematic-render = "0.5.1"
+litematic-scene = "0.5.1"
 
 # Keep this aligned with nucleation so the tree contains one NBT implementation.
 quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }

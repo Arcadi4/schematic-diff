@@ -466,7 +466,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -710,8 +710,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "litematic-core"
-version = "0.5.0"
-source = "git+https://github.com/linvin-1233/blockscope?rev=f7cefd6cb2a447c7ae217e100a1e8727659bb351#f7cefd6cb2a447c7ae217e100a1e8727659bb351"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62533b14e96d1343d808e2eea049b541e74806af22850be05c031d1ac2b3699"
 dependencies = [
  "litematic-nbt",
  "litematic-scene",
@@ -719,8 +720,9 @@ dependencies = [
 
 [[package]]
 name = "litematic-material"
-version = "0.5.0"
-source = "git+https://github.com/linvin-1233/blockscope?rev=f7cefd6cb2a447c7ae217e100a1e8727659bb351#f7cefd6cb2a447c7ae217e100a1e8727659bb351"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "378c4b674deea78b7d770eb0bce66ee3fe3781137a83b6a4f2770f8f953646d8"
 dependencies = [
  "litematic-mesh",
  "litematic-scene",
@@ -732,8 +734,9 @@ dependencies = [
 
 [[package]]
 name = "litematic-mesh"
-version = "0.5.0"
-source = "git+https://github.com/linvin-1233/blockscope?rev=f7cefd6cb2a447c7ae217e100a1e8727659bb351#f7cefd6cb2a447c7ae217e100a1e8727659bb351"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebcb4cc1c5913c351a016a89f22778423d57b835a8f2be7f449468542b3faba9"
 dependencies = [
  "litematic-scene",
  "serde",
@@ -742,16 +745,18 @@ dependencies = [
 
 [[package]]
 name = "litematic-nbt"
-version = "0.5.0"
-source = "git+https://github.com/linvin-1233/blockscope?rev=f7cefd6cb2a447c7ae217e100a1e8727659bb351#f7cefd6cb2a447c7ae217e100a1e8727659bb351"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "785e2ae589ff31318997fe3a8e9c4b7edc869e4775db7988cc940b2a7e8a9e18"
 dependencies = [
  "flate2",
 ]
 
 [[package]]
 name = "litematic-render"
-version = "0.5.0"
-source = "git+https://github.com/linvin-1233/blockscope?rev=f7cefd6cb2a447c7ae217e100a1e8727659bb351#f7cefd6cb2a447c7ae217e100a1e8727659bb351"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbe67656784bd845fb27dcc919fc0649fb9591932405a2a3938b069d42c58ca0"
 dependencies = [
  "litematic-material",
  "litematic-mesh",
@@ -763,8 +768,9 @@ dependencies = [
 
 [[package]]
 name = "litematic-scene"
-version = "0.5.0"
-source = "git+https://github.com/linvin-1233/blockscope?rev=f7cefd6cb2a447c7ae217e100a1e8727659bb351#f7cefd6cb2a447c7ae217e100a1e8727659bb351"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b8c20efd9e62dd3b67df7f2ea027ccc171836b1a38c8b5aa73d1b1af8146ae2"
 dependencies = [
  "litematic-nbt",
  "serde",
@@ -1208,7 +1214,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1219,7 +1225,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "schematic-diff"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.23.1",
  "bpaf",
@@ -1411,7 +1417,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
