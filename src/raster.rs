@@ -3,13 +3,13 @@
 
 use crate::error::{Error, Result};
 use crate::font;
-use litematic_material::TextureSet;
-use litematic_mesh::Mesh;
-use litematic_render::{
+use blockscope_material::TextureSet;
+use blockscope_mesh::Mesh;
+use blockscope_render::{
     Background, LightingProfile, RenderBackend, RenderOptions, render_mesh,
     render_mesh_with_textures,
 };
-use litematic_scene::Scene;
+use blockscope_scene::Scene;
 use nucleation::meshing::MeshOutput;
 
 use crate::mesh::{TintedMesh, draw as draw_mesh, draw_changes};

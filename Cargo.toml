@@ -24,11 +24,11 @@ nucleation = { version = "=0.10.14", default-features = false, features = [
 schematic-mesher = "0.2.0"
 
 # Blockscope crates provide the litematic backend.
-litematic-core = "0.5.1"
-litematic-material = "0.5.1"
-litematic-mesh = "0.5.1"
-litematic-render = "0.5.1"
-litematic-scene = "0.5.1"
+blockscope-core = "0.5.2"
+blockscope-material = "0.5.2"
+blockscope-mesh = "0.5.2"
+blockscope-render = "0.5.2"
+blockscope-scene = "0.5.2"
 
 # Keep this aligned with nucleation so the tree contains one NBT implementation.
 quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
