@@ -15,13 +15,10 @@ name = "schematic-diff"
 path = "src/main.rs"
 
 [dependencies]
-# Pinned because 0.10.15 through 0.10.24 enable `src/animation/glb.rs` with
-# `meshing`, but published `schematic-mesher 0.2.0` lacks the required
-# `gltf_build` API.
-nucleation = { version = "=0.10.14", default-features = false, features = [
+nucleation = { version = "0.12", default-features = false, features = [
   "meshing",
 ] }
-schematic-mesher = "0.2.1"
+schematic-mesher = "0.2"
 
 # Blockscope crates provide the litematic backend.
 blockscope-core = "0.5.2"
@@ -31,18 +28,16 @@ blockscope-render = "0.5.2"
 blockscope-scene = "0.5.2"
 
 # Keep this aligned with nucleation so the tree contains one NBT implementation.
-quartz_nbt = { version = "0.2.9", features = ["preserve_order"] }
-flate2 = { version = "1.1.11", default-features = false, features = [
-  "zlib-rs",
-] }
+quartz_nbt = { version = "0.2", features = ["preserve_order"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
-rayon = "1.11"
+rayon = "1"
 png = "0.18"
 base64 = "0.23"
 
-bpaf = { version = "0.9.28", features = ["derive"] }
+bpaf = { version = "0.9", features = ["derive"] }
 
-libc = "0.2.191"
+libc = "0.2"
 
 # Debug info is the most expensive part of an unoptimized build, and a
 # backtrace only needs this crate's line tables to name a source line.

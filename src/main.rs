@@ -909,6 +909,34 @@ fn format_stat(
     lines
 }
 
+/// Count cells per palette index over the region's logical bounds.
+fn palette_index_counts(region: &Region) -> Vec<usize> {
+    let palette_len = region.get_palette().len();
+    (0..region.volume())
+        .into_par_iter()
+        .fold(
+            || vec![0usize; palette_len],
+            |mut counts, index| {
+                let (x, y, z) = region.bounds_cell(index);
+                if let Some(palette_index) = region.get_block_index(x, y, z)
+                    && palette_index < counts.len()
+                {
+                    counts[palette_index] += 1;
+                }
+                counts
+            },
+        )
+        .reduce(
+            || vec![0usize; palette_len],
+            |mut a, b| {
+                for (count, other) in a.iter_mut().zip(b) {
+                    *count += other;
+                }
+                a
+            },
+        )
+}
+
 fn format_palette_stat(lines: &mut Vec<String>, loaded: &Loaded, prefix: &str, mode: StatMode) {
     let mut counts: HashMap<String, usize> = HashMap::new();
     let regions: Vec<&Region> = std::iter::once(&loaded.schematic.default_region)
@@ -924,32 +952,10 @@ fn format_palette_stat(lines: &mut Vec<String>, loaded: &Loaded, prefix: &str, m
                 .map(|b| (b.get_name(), render::is_air(b)))
                 .collect();
 
-            let chunk_counts = region
-                .blocks
-                .par_chunks(65536)
-                .fold(
-                    || vec![0usize; palette.len()],
-                    |mut acc, chunk| {
-                        for &idx in chunk {
-                            if idx < acc.len() {
-                                acc[idx] += 1;
-                            }
-                        }
-                        acc
-                    },
-                )
-                .reduce(
-                    || vec![0usize; palette.len()],
-                    |mut a, b| {
-                        for (acc, count) in a.iter_mut().zip(b) {
-                            *acc += count;
-                        }
-                        a
-                    },
-                );
+            let palette_counts = palette_index_counts(region);
 
             let mut local_map: HashMap<String, usize> = HashMap::new();
-            for (idx, &count) in chunk_counts.iter().enumerate() {
+            for (idx, &count) in palette_counts.iter().enumerate() {
                 if idx < names.len() {
                     let (name, is_air) = names[idx];
                     if !is_air && count > 0 {
@@ -1018,31 +1024,9 @@ fn count_non_air_blocks_parallel(schematic: &UniversalSchematic) -> usize {
             let palette = region.get_palette();
             let is_air_flags: Vec<bool> = palette.iter().map(render::is_air).collect();
 
-            let chunk_counts = region
-                .blocks
-                .par_chunks(65536)
-                .fold(
-                    || vec![0usize; palette.len()],
-                    |mut acc, chunk| {
-                        for &idx in chunk {
-                            if idx < acc.len() {
-                                acc[idx] += 1;
-                            }
-                        }
-                        acc
-                    },
-                )
-                .reduce(
-                    || vec![0usize; palette.len()],
-                    |mut a, b| {
-                        for (acc, count) in a.iter_mut().zip(b) {
-                            *acc += count;
-                        }
-                        a
-                    },
-                );
+            let palette_counts = palette_index_counts(region);
 
-            chunk_counts
+            palette_counts
                 .iter()
                 .enumerate()
                 .filter(|(idx, _)| !is_air_flags.get(*idx).copied().unwrap_or(true))
@@ -1216,3 +1200,30 @@ fn expand_tilde_path(path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_counts_use_logical_bounds_and_exclude_every_air_variant() {
+        let mut schematic = UniversalSchematic::new("test".to_string());
+        let mut region = Region::try_new("test".to_string(), (0, 0, 0), (1, 1, 1)).unwrap();
+        region.set_block(0, 0, 0, &BlockState::new("minecraft:stone".to_string()));
+        region.set_block(1, 0, 0, &BlockState::new("minecraft:cave_air".to_string()));
+        region.set_block(2, 0, 0, &BlockState::new("minecraft:dirt".to_string()));
+        schematic.default_region = region;
+        let loaded = Loaded {
+            schematic,
+            format: "test".to_string(),
+            entities: 0,
+        };
+
+        let mut lines = Vec::new();
+        format_palette_stat(&mut lines, &loaded, "", StatMode::Uncapped);
+        let stat = lines.join("\n");
+        assert!(stat.contains("1  minecraft:stone"), "{stat}");
+        assert!(stat.contains("1  minecraft:dirt"), "{stat}");
+        assert!(!stat.contains("air"), "{stat}");
+        assert_eq!(count_non_air_blocks_parallel(&loaded.schematic), 2);
+    }
+}
