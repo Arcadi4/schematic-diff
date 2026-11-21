@@ -265,23 +265,22 @@ fn read_palette(root: &NbtCompound) -> Option<Vec<String>> {
 /// game writes and the int-array encoding other tools emit.
 fn triple(compound: &NbtCompound, key: &str) -> Option<[i32; 3]> {
     let tag = compound.inner().get(key)?;
-    let values: Vec<i32> = match tag {
-        NbtTag::IntArray(values) => values.clone(),
-        NbtTag::List(list) => {
-            let mut out = Vec::with_capacity(list.len());
-            for entry in list.iter() {
-                out.push(match entry {
-                    NbtTag::Byte(v) => i32::from(*v),
-                    NbtTag::Short(v) => i32::from(*v),
-                    NbtTag::Int(v) => *v,
-                    _ => return None,
-                });
-            }
-            out
-        }
-        _ => return None,
+    if let NbtTag::IntArray(values) = tag {
+        return Some(*values.as_array::<3>()?);
+    }
+    let NbtTag::List(list) = tag else {
+        return None;
     };
-    let [x, y, z] = values.as_slice() else {
+    let mut out = Vec::with_capacity(list.len());
+    for entry in list.iter() {
+        out.push(match entry {
+            NbtTag::Byte(v) => i32::from(*v),
+            NbtTag::Short(v) => i32::from(*v),
+            NbtTag::Int(v) => *v,
+            _ => return None,
+        });
+    }
+    let [x, y, z] = out.as_slice() else {
         return None;
     };
     Some([*x, *y, *z])
