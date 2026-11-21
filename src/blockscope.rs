@@ -1160,12 +1160,13 @@ fn format_stat(
             });
 
             lines.push("  stat".to_string());
+            let mut buffer = std::fmt::NumBuffer::new();
             let width = items
                 .iter()
                 .map(|item| match item {
                     Entry::Added { count, .. }
                     | Entry::Removed { count, .. }
-                    | Entry::Modified { count, .. } => count.to_string().len(),
+                    | Entry::Modified { count, .. } => count.format_into(&mut buffer).len(),
                 })
                 .max()
                 .unwrap_or(1);
@@ -1227,9 +1228,10 @@ fn format_palette_stat(lines: &mut Vec<String>, scene: &Scene, prefix: &str, mod
     }
     items.sort_unstable_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
     lines.push("  stat".to_string());
+    let mut buffer = std::fmt::NumBuffer::new();
     let width = items
         .iter()
-        .map(|(_, count)| count.to_string().len())
+        .map(|(_, count)| count.format_into(&mut buffer).len())
         .max()
         .unwrap_or(1);
     let (visible, remaining) = match mode {

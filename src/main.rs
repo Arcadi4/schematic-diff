@@ -845,12 +845,13 @@ fn format_stat(
             });
 
             lines.push("  stat".to_string());
+            let mut buffer = std::fmt::NumBuffer::new();
             let max_count_len = items
                 .iter()
                 .map(|item| match item {
                     StatEntry::Added { count, .. }
                     | StatEntry::Removed { count, .. }
-                    | StatEntry::Modified { count, .. } => count.to_string().len(),
+                    | StatEntry::Modified { count, .. } => count.format_into(&mut buffer).len(),
                 })
                 .max()
                 .unwrap_or(1);
@@ -984,9 +985,10 @@ fn format_palette_stat(lines: &mut Vec<String>, loaded: &Loaded, prefix: &str, m
         count_b.cmp(count_a).then_with(|| name_a.cmp(name_b))
     });
 
+    let mut buffer = std::fmt::NumBuffer::new();
     let max_count_len = items
         .iter()
-        .map(|(_, count)| count.to_string().len())
+        .map(|(_, count)| count.format_into(&mut buffer).len())
         .max()
         .unwrap_or(1);
 
